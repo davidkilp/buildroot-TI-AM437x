@@ -1,0 +1,34 @@
+#!/bin/sh
+#
+# Start the wpa_supplicant....
+#
+# NOTE: In order to allow the root filesystem to be mounted read-only.
+# we must put the wpa_supplicant.conf file somewhere it can be written
+# to when user does a "save_config" to update it. 
+#
+# We can either put it to ramdisk or our special parition #2 (/mnt/Elektra60)
+# for updating.
+#
+# We check if file exists in the location and if not create the initial 
+# base version by copying the reference from /etc
+#
+WPA_CONF=/etc/wpa_supplicant.conf
+
+case "$1" in
+  start)
+	wpa_supplicant -e /var/run/entropy.bin -iwlan0 -Dnl80211 -B -c $WPA_CONF
+        ;;
+  stop)
+        echo "Stopping wpa..."
+        killall wpa_supplicant
+        ;;
+  restart|reload)
+        "$0" stop
+        "$0" start
+        ;;
+  *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+esac
+
+exit $?

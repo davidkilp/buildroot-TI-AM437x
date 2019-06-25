@@ -1,0 +1,353 @@
+From 66f5769b82ce19c7f78c74d3ee4b1ca29bfa043b Mon Sep 17 00:00:00 2001
+From: David Kilp <David.Kilp@crossmatch.com>
+Date: Tue, 9 Oct 2018 16:29:20 -0400
+Subject: [PATCH 08/18] Add driver to support the Fairchild FSA9485 USB Port
+ Multimedia Switch.
+
+---
+ drivers/misc/fsa9485.c | 333 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 333 insertions(+)
+ create mode 100644 drivers/misc/fsa9485.c
+
+diff --git a/drivers/misc/fsa9485.c b/drivers/misc/fsa9485.c
+new file mode 100644
+index 0000000..bad2bbb
+--- /dev/null
++++ b/drivers/misc/fsa9485.c
+@@ -0,0 +1,333 @@
++/*
++ * Driver for Fairchild FSA9485 USB Port Multimedia Switch
++ *
++ *			Copyright (C) 2014 Cross Match Technologies
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ */
++
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/types.h>
++
++#define FSA9485_NAME	"fsa9485"
++
++#define DRIVER_VERSION			"2.0.0"
++
++#define DEFAULT_POLL_DELAY	(0)		/* ms delay between irq & sample */
++
++
++/* FSA9485 Registers */
++/* Device ID: 0x01 */
++/* 
++ * |  7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
++ * | Version ID         | Vendor ID |
++ *    Vendor ID - bits 0..2
++ *    Version ID - bits 3..7
++*/
++#define FSA9485_DEVID 0x01
++
++/* Control: 0x02 */
++/* 
++ * |  7  | 6   | 5   |     4       |    3     |     2      |   1  |     0    |
++ * | res | res | res | Switch Open | RAW Data | Manual S/W | Wait | INT Mask |
++*/
++#define FSA9485_CONTROL 0x02
++#define FSA9485_WAIT		 		BIT(1)
++#define FSA9485_INT_MASK			BIT(0)
++
++/* Interrupt 1: 0x03 */
++/* 
++ * |      7       |    6   |    5   |  4  |  3  |  2  |    1   |   0    |
++ * |  OVP_OCP_DIS | OCP_EN | OVP_EN | LKR | LPK |  KP | Detach | Attach | 
++*/
++#define FSA9485_INT1 0x03
++
++/* Interrupt 2: 0x04 */
++/* 
++ * |  7  |  6  |  5  |      4        |     3     |      2     |         1       |     0     |
++ * | res | res | res | Stuck key RCV | Stuck Key | ADC change | Reserved Attach | A/V Charg | 
++*/
++#define FSA9485_INT2 0x04
++
++/* Interrupt Mask 1: 0x05 */
++/* 
++ * |      7       |    6   |    5   |  4  |  3  |  2  |    1   |   0    |
++ * |  OVP_OCP_DIS | OCP_EN | OVP_EN | LKR | LPK |  KP | Detach | Attach | 
++*/
++#define FSA9485_INT1_MASK 0x05
++
++/* Interrupt 2 Mask: 0x06 */
++/* 
++ * |  7  |  6  |  5  |      4        |     3     |      2     |         1       |     0     |
++ * | res | res | res | Stuck key RCV | Stuck Key | ADC change | Reserved Attach | A/V Charg | 
++*/
++#define FSA9485_INT2_MASK 0x06
++
++/* Reset: 0x1B */
++/* 
++ * |  7  |  6  |  5  |  4  |  3  |  2  |         1           |   0   |
++ * | res | res | res | res | res | res | Charger FET Disable | Reset | 
++*/
++#define FSA9485_RESET_REG 	0x1B
++#define FSA9485_RESET_MASK	BIT(0)
++
++
++
++struct fsa9485_data {
++	struct device *dev;
++	struct i2c_client *client;
++	struct input_dev *input_dev;
++	struct mutex xfer_lock;
++
++	/* Interrupt Handling */
++	int irq;
++	struct delayed_work work;
++	unsigned long debounce_jiffies;
++};
++
++static int fsa9485_read_bytes(struct fsa9485_data *fsad, u8 reg, u8 *data, u8 len)
++{
++	s32 ret;
++
++	mutex_lock(&fsad->xfer_lock);
++	ret = i2c_smbus_read_i2c_block_data(fsad->client, reg, len, data);
++	mutex_unlock(&fsad->xfer_lock);
++
++	return (ret != len) ? -EIO : 0;
++}
++
++static inline int fsa9485_read_byte(struct fsa9485_data *fsad, u8 reg, u8 *data)
++{
++	return fsa9485_read_bytes(fsad, reg, data, 1);
++}
++
++static int fsa9485_write_byte(struct fsa9485_data *fsad, u8 reg, u8 data)
++{
++	int ret;
++
++	mutex_lock(&fsad->xfer_lock);
++	ret = i2c_smbus_write_byte_data(fsad->client, reg, data);
++	mutex_unlock(&fsad->xfer_lock);
++
++	return ret;
++}
++
++/* 
++ * Basically for this chip to function, whenever it detects something 
++ * new getting attached/removed it will generate an interrupt that we
++ * must read/acknowlege to reset it so it will work again the next time
++ * another event happens. It can do other things but we at least need to
++ * read the 2 interrupt registers so it will continue to function
++ */
++static void fsa9485_delayed_func(struct work_struct *_work)
++{
++	struct fsa9485_data *fsad = container_of(_work, struct fsa9485_data,
++						work.work);
++	u8 val = 0;
++
++	pr_debug("FSA9485 Interrupt - read INT register\n");
++	/* clear any pending interrupts */
++	/* read Interrupt reg 1 & 2 */
++	fsa9485_read_byte(fsad, FSA9485_INT1, &val);
++	pr_debug("INT 1 = 0x%02X\n", val);
++	fsa9485_read_byte(fsad, FSA9485_INT2, &val);
++	pr_debug("INT 2 = 0x%02X\n", val);
++
++	/* Re-enable the interrupts from the device */
++	enable_irq(fsad->irq);
++}
++
++static irqreturn_t fsa9485_irq_handler(int irq, void *dev_id)
++{
++	struct fsa9485_data *fsad = dev_id;
++
++	/*
++	 * Disable further interrupts from the device
++	 * Note that, we assume that the device is configured
++	 * to operate in  Mode1 where the interrupt line is
++	 * pulled low until the IMR register is written
++	 * again. Since the irq is configured as
++	 * edge sensitive for falling edge, we explicitly disable
++	 * further interrupts from the device until we finish
++	 * processing all the messages from the bottom half and
++	 * re-enable it from the bottom half.
++	 */
++	disable_irq_nosync(fsad->irq);
++	schedule_delayed_work(&fsad->work, fsad->debounce_jiffies);
++	return IRQ_HANDLED;
++}
++
++static int fsa9485_setup_irq(struct fsa9485_data *fsad)
++{
++	int ret;
++	int irq = fsad->client->irq;
++	u8 val;
++
++	if (irq <= 0) {
++		dev_warn(fsad->dev, "invalid irq number: %d\n", irq);
++		return 0;
++	}
++
++	INIT_DELAYED_WORK(&fsad->work, fsa9485_delayed_func);
++
++	ret = request_irq(irq, fsa9485_irq_handler,
++				IRQF_TRIGGER_FALLING, "fsa9485_irq", fsad);
++	if (ret)
++		return ret;
++
++	fsad->irq = irq;
++	fsad->debounce_jiffies = msecs_to_jiffies(DEFAULT_POLL_DELAY);
++
++	/* clear any pending interrupts */
++	ret = fsa9485_read_byte(fsad, FSA9485_INT1, &val);
++	ret = fsa9485_read_byte(fsad, FSA9485_INT2, &val);
++
++	/* configure interrupts by writing to FSA9485 Control register to clear bit 0 */
++	fsa9485_read_byte(fsad, FSA9485_CONTROL, &val);
++	val &=  ~(FSA9485_INT_MASK);
++	ret = fsa9485_write_byte(fsad, FSA9485_CONTROL, val);
++	if (ret)
++		return ret;
++
++	return 0;
++}
++
++static void fsa9485_release_irq(struct fsa9485_data *fsad)
++{
++	cancel_delayed_work_sync(&fsad->work);
++
++	if (fsad->irq)
++		free_irq(fsad->irq, fsad);
++}
++
++static int fsa9485_init_device(struct fsa9485_data *fsad)
++{
++	u8 chip_id = 0x00;
++	int ret;
++
++	/* Verify that the device is present */
++	ret = fsa9485_read_byte(fsad, FSA9485_DEVID, &chip_id);
++	//if (retval < 0 || chip_id != 0x05) {
++	if (ret == -1) {
++		pr_warning("FSA9485 USB Switch not found\n");
++		return -ENODEV;
++	}
++
++	dev_info(fsad->dev, "FSA9485 USB Charger Detect Device ID ver. %s enabled. ChipID: 0x%02X\n", DRIVER_VERSION, chip_id);
++
++	return ret;
++}
++
++static int fsa9485_probe(struct i2c_client *client,
++					const struct i2c_device_id *id)
++{
++	struct fsa9485_data *fsad;
++	int ret;
++
++	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
++		dev_err(&client->dev, "need I2C_FUNC_I2C\n");
++		return -EIO;
++	}
++
++	fsad = devm_kzalloc(&client->dev, sizeof(*fsad), GFP_KERNEL);
++	if (!fsad)
++		return -ENOMEM;
++
++	fsad->client = client;
++	fsad->dev = &client->dev;
++	i2c_set_clientdata(client, fsad);
++
++	mutex_init(&fsad->xfer_lock);
++
++	ret = fsa9485_init_device(fsad);
++	if (ret) {
++		dev_err(fsad->dev, "i2c communication err: %d", ret);
++		return ret;
++	}
++
++	ret = fsa9485_setup_irq(fsad);
++	if (ret) {
++		dev_err(fsad->dev, "Failed to register interrupt: %d", ret);
++		return ret;
++	}
++
++	return 0;
++}
++
++static int fsa9485_remove(struct i2c_client *client)
++{
++	struct fsa9485_data *fsad = i2c_get_clientdata(client);
++
++	fsa9485_release_irq(fsad);
++
++	return 0;
++}
++
++#ifdef CONFIG_PM
++static int fsa9485_suspend(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct fsa9485_data *fsad = i2c_get_clientdata(client);
++	printk(KERN_DEBUG "fsa9485_suspend begins\n");
++
++	if (fsad) {
++		cancel_delayed_work_sync(&fsad->work);
++	}
++	return 0;
++}
++
++/*
++ * On resume we need to schedule the work done in the 
++ * IRQ so that if something happened while we were sleeping
++ * we reset the interrupt registers for future events
++ */
++static int fsa9485_resume(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct fsa9485_data *fsad = i2c_get_clientdata(client);
++	printk(KERN_DEBUG "fsa9485_resume begins\n");
++
++	if (fsad) {
++		disable_irq_nosync(fsad->irq);
++		schedule_delayed_work(&fsad->work, fsad->debounce_jiffies);
++	}
++	return 0;
++}
++
++static const struct dev_pm_ops fsa9485_pm_ops = {
++	.suspend	= fsa9485_suspend,
++	.resume		= fsa9485_resume,
++};
++#endif
++
++static const struct i2c_device_id fsa9485_id[] = {
++	{ FSA9485_NAME, 0 },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, fsa9485_id);
++
++static struct i2c_driver fsa9485_driver = {
++	.probe		= fsa9485_probe,
++	.remove		= fsa9485_remove,
++	.id_table	= fsa9485_id,
++	.driver = {
++		.name	= FSA9485_NAME,
++		.owner	= THIS_MODULE,
++#ifdef CONFIG_PM
++		.pm	= &fsa9485_pm_ops,
++#endif
++	},
++};
++
++module_i2c_driver(fsa9485_driver);
++
++MODULE_DESCRIPTION("Fairchild FSA9485 USB Port Multimedia Switch");
++MODULE_AUTHOR("David Kilp <david.kilp@crossmatch.com>");
++MODULE_LICENSE("GPL");
+-- 
+2.9.5
+

@@ -1,0 +1,1327 @@
+From 0a38ed34834d775488aaacd6a56b60404f3ed59a Mon Sep 17 00:00:00 2001
+From: David Kilp <David.Kilp@crossmatch.com>
+Date: Tue, 9 Oct 2018 16:19:17 -0400
+Subject: [PATCH 05/18] Add support for the Linear Tech LTC4155 Dual-Input
+ Battery Charger chip as used on Crossmatch Sentry device.
+
+---
+ drivers/power/supply/Kconfig           |    6 +
+ drivers/power/supply/Makefile          |    1 +
+ drivers/power/supply/ltc4155_charger.c | 1134 ++++++++++++++++++++++++++++++++
+ include/dt-bindings/power/ltc4155.h    |   45 ++
+ include/linux/power/ltc4155.h          |   81 +++
+ 5 files changed, 1267 insertions(+)
+ create mode 100644 drivers/power/supply/ltc4155_charger.c
+ create mode 100644 include/dt-bindings/power/ltc4155.h
+ create mode 100644 include/linux/power/ltc4155.h
+
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index e740787..c69af95 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -348,6 +348,12 @@ config CHARGER_LP8788
+ 	help
+ 	  Say Y to enable support for the LP8788 linear charger.
+ 
++config CHARGER_LTC4155
++	tristate "Linear Tech LTC4155 charger driver"
++	depends on I2C
++	help
++	  Say Y here to enable support for LTC4155 Dual-Input Battery Charger.
++
+ config CHARGER_GPIO
+ 	tristate "GPIO charger"
+ 	depends on GPIOLIB || COMPILE_TEST
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 110df86..347d5d6 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -57,6 +57,7 @@ obj-$(CONFIG_CHARGER_MAX8903)	+= max8903_charger.o
+ obj-$(CONFIG_CHARGER_TWL4030)	+= twl4030_charger.o
+ obj-$(CONFIG_CHARGER_LP8727)	+= lp8727_charger.o
+ obj-$(CONFIG_CHARGER_LP8788)	+= lp8788-charger.o
++obj-$(CONFIG_CHARGER_LTC4155)	+= ltc4155_charger.o
+ obj-$(CONFIG_CHARGER_GPIO)	+= gpio-charger.o
+ obj-$(CONFIG_CHARGER_MANAGER)	+= charger-manager.o
+ obj-$(CONFIG_CHARGER_MAX14577)	+= max14577_charger.o
+diff --git a/drivers/power/supply/ltc4155_charger.c b/drivers/power/supply/ltc4155_charger.c
+new file mode 100644
+index 0000000..b92dbb9
+--- /dev/null
++++ b/drivers/power/supply/ltc4155_charger.c
+@@ -0,0 +1,1134 @@
++/*
++ * Driver for LTC4155 Dual-Input Battery Charger
++ *
++ *			Copyright (C) 2014 Cross Match Technologies
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ */
++
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/interrupt.h>
++#include <linux/i2c.h>
++#include <linux/power_supply.h>
++#include <linux/pm_runtime.h>
++#include <linux/proc_fs.h>
++#include <linux/seq_file.h>
++#include <linux/wakelock.h>
++#include <asm/uaccess.h>
++#include <linux/of.h>
++#include <linux/of_gpio.h>
++
++#include <linux/power/ltc4155.h>
++
++#define DRIVER_VERSION			"2.0.0"
++
++#define DEFAULT_POLL_DELAY	(10)		/* ms delay between irq & sample */
++
++/* Registers */
++/* Register 0 */
++/* Contains Bit Fields
++ *    USBILIM -  Programmed USB total input current limit
++ *    LOCKOUT_ID_PIN -  Disables autonomous USB OTG operation when ID pin is grounded by an appropriate USB cable
++ *    USER_EN_BATDISCHARGER -  Enables autonomous Overtemperature Battery Conditioner Load when NTC thermistor temp exceeds 60C
++ *    DISABLE_INPUT_UVCL -  Disables automatic power reduction in response to low input voltage
++*/
++#define LTC4155_SUB0 0x00
++
++/* Register 1 */
++/* Contains Bit Fields
++ *    WALLILIM -  Programmed Wall total input current limit
++ *    TIMER -  Li-Ion charger safety timer
++ *    PRIORITY -  Input connector priority swap
++*/
++#define LTC4155_SUB1 0x01
++
++/* Register 2 */
++/* Contains Bit Fields
++ *    CXSET -  User programmed end-of-charge indication current threshold
++ *    FLOAT_VOLTAGE_LI_ION -  User programmed battery float voltage
++ *    CHARGE_CURRENT_LIMIT -  User programmed battery charger current limit
++*/
++#define LTC4155_SUB2 0x02
++
++#define LTC4155_CXSET_OFFSET 0
++#define LTC4155_VFLOAT_OFFSET 2
++#define LTC4155_CHARGE_CURRENT_LIMIT_OFFSET 4
++
++
++/* Register 4 */
++/* Contains Bit Fields
++ *    LOWBAT -  Battery below ~2.8V or charger disabled
++ *    NTCSTAT -  NTC Thermistor Status
++ *    EN_BOOST -  On-the-Go boost converter enable status
++ *    ID_DETECT -  On-the-Go boost ID pin detection status
++ *    CHARGER_STATUS -  Battery charger status
++*/
++#define LTC4155_SUB3 0x03
++
++#define LTC4155_LOWBAT_OFFSET 0
++#define LTC4155_LOWBAT_MASK 0x01
++#define LTC4155_LOWBAT(x)	 ( (x & LTC4155_LOWBAT_MASK) >> LTC4155_LOWBAT_OFFSET)
++
++#define LTC4155_NTCSTAT_OFFSET 1
++#define LTC4155_NTCSTAT_MASK 0x06
++#define LTC4155_NTCSTAT(x)	 ( (x & LTC4155_NTCSTAT_MASK) >> LTC4155_NTCSTAT_OFFSET)
++#define LTC4155_NTCSTAT_PRESET_NORMAL 0x0
++#define LTC4155_NTCSTAT_PRESET_TOO_COLD 0x1
++#define LTC4155_NTCSTAT_PRESET_TOO_WARM 0x2
++#define LTC4155_NTCSTAT_PRESET_HOT_FAULT 0x3
++
++#define LTC4155_EN_BOOST_OFFSET 3
++#define LTC4155_EN_BOOST_MASK 0x08
++#define LTC4155_EN_BOOST(x)	 ( (x & LTC4155_EN_BOOST_MASK) >> LTC4155_EN_BOOST_OFFSET)
++
++#define LTC4155_ID_DETECT_OFFSET 4
++#define LTC4155_ID_DETECT_MASK 0x10
++#define LTC4155_ID_DETECT(x)	 ( (x & LTC4155_ID_DETECT_MASK) >> LTC4155_ID_DETECT_OFFSET)
++
++#define LTC4155_CHARGER_STATUS_OFFSET 5
++#define LTC4155_CHARGER_STATUS_MASK 0xE0
++#define LTC4155_CHARGER_STATUS(x)	 ( (x & LTC4155_CHARGER_STATUS_MASK) >> LTC4155_CHARGER_STATUS_OFFSET)
++#define LTC4155_CHARGER_STATUS_PRESET_CHARGER_OFF 0x0
++#define LTC4155_CHARGER_STATUS_PRESET_LOW_BAT 0x1
++#define LTC4155_CHARGER_STATUS_PRESET_CONSTANT_CURRENT 0x2
++#define LTC4155_CHARGER_STATUS_PRESET_CONSTANT_VOLTAGE_COMA__I_GRTR_THN_C_DIV_X 0x3
++#define LTC4155_CHARGER_STATUS_PRESET_CONSTANT_VOLTAGE_COMA__I_LSS_THN_C_DIV_X 0x4
++#define LTC4155_CHARGER_STATUS_PRESET_NTC_TOO_WARM_TO_CHARGE 0x5
++#define LTC4155_CHARGER_STATUS_PRESET_NTC_TOO_COLD_TO_CHARGE 0x6
++#define LTC4155_CHARGER_STATUS_PRESET_NTC_CRITICALLY_HOT 0x7
++
++
++/* Register 4 */
++/* Contains Bit Fields
++ *    BAD_CELL -  Battery unresponsive to charging for 30 minutes
++ *    OTG_FAULT -  USB On-The-Go step-up regulator fault shutdown
++ *    OVP_ACTIVE -  Overvoltage protection fault
++ *    INPUT_UVCL_ACTIVE -  Input Undervoltage Current Limit (brownout) status
++ *    AT_ILIM -  Input Current Limit status
++ *    WALLSNSGD -  WALL input voltage valid
++ *    USBSNSGD -  USB input voltage valid
++ *    EXTPWRGD -  External power (Wall or USB) available
++*/
++#define LTC4155_SUB4 0x04
++#define LTC4155_BAD_CELL				BIT(0)
++#define LTC4155_OTG_FAULT				BIT(1)
++#define LTC4155_OVP_ACTIVE				BIT(2)
++#define LTC4155_INPUT_UVCL_ACTIVE		BIT(3)
++#define LTC4155_AT_ILIM					BIT(4)
++#define LTC4155_WALLSNSGD				BIT(5)
++#define LTC4155_USBSNSGD				BIT(6)
++#define LTC4155_EXTPWRGD				BIT(7)
++
++
++/* Register 5 */
++/* Contains Bit Fields
++ *    NTC_WARNING -  NTC Temperature out of range for battery charging
++ *    NTC -  NTC ADC conversion result
++*/
++#define LTC4155_SUB5 0x05
++#define LTC4155_NTC_ERROR				BIT(0)
++
++/* Register 6 */
++/* Interrupt Mask Resister (IMR) */
++/* Contains Bit Fields
++ *  7:CHARGER_STATUS_IRQ_MASK	- any change in CHARGER_STATUS[2:0] (REG3)
++ *  6:FAULT_IRQ_MASK 			- triggered by any change in OVP_ACTIVE, BAD_CELL, OTG_FAULT, NTC_FAULT 
++ * 	5:EXTERNAL_POWER_AVAIL_IRQ_MASK - triggered by change in USBSNSGD, WALLSNSGD, or EXTPWRGD
++ *  4:USB_OTG_IRQ_MASK - triggered by change in EN_BOOST, ID_DETECT
++ *  3:INPUT_CURRENT_LIMIT_IRQ_MASK - triggered by any change in AT_INPUT_ILIM (reg4)
++ *  2:INPUT_UNDERVOLTAGE_CURRENT_LIMIT(BROWNOUT)_IRQ_MASK - triggered by change in INPUT_UVCL_ACTIVE (reg4)
++ *  1:USB_OTG_STEP_UP_VOLTAGE_ACTIVE_MANUAL_IRQ_MASK	
++*/
++#define LTC4155_IMR 0x06
++#define LTC4155_CHARGER_STATUS_INT	BIT(7)
++#define LTC4155_FAULT_INT			BIT(6)
++#define LTC4155_EXTPOWER_INT		BIT(5)
++
++
++enum ltc4155_ntc_status {
++	LTC4155_NTC_NORMAL,
++	LTC4155_NTC_TOO_COLD,
++	LTC4155_NTC_TOO_WARM,
++	LTC4155_NTC_HOT_FAULT,
++};
++
++struct ltc4155_psy {
++	struct power_supply *ac;
++	struct power_supply *usb;
++};
++
++struct ltc4155_chg {
++	struct device *dev;
++	struct i2c_client *client;
++	struct mutex xfer_lock;
++	struct ltc4155_psy *psy;
++	struct ltc4155_platform_data *pdata;
++	u8 reg3_cached;
++	u8 reg4_cached;
++	u8 reg4_saved;
++
++	/* Charger Data */
++	int wall_charger_online;
++	int usb_charger_online;
++	struct ltc4155_chg_param *chg_param;
++
++	/* Interrupt Handling */
++	int irq;
++	struct delayed_work work;
++	unsigned long debounce_jiffies;
++	
++	/* Android wakelock to prevent sleep while on A/C */
++	struct wake_lock wake_lock;
++};
++
++/*
++ * Temperature lookup table based on NTC value and
++ * Claimcheck thermistor curve
++ */ 
++#define NTC_MIN		17
++#define NTC_MAX		102
++#if 0
++static char *ltc4155_lookup_table[] = {
++	"69.4C (157.0F)",		// value at NTC_MIN (17)
++	"68.2C (154.8F)",
++	"67.0C (152.6F)",
++	"65.9C (150.5F)",
++	"64.7C (148.5F)",
++	"63.6C (146.5F)",
++	"62.5C (144.6F)",
++	"61.5C (142.7F)",
++	"60.5C (140.8F)",
++	"59.4C (139.0F)",
++	"58.5C (137.2F)",
++	"57.5C (135.5F)",
++	"56.5C (133.8F)",
++	"55.6C (132.1F)",
++	"54.7C (130.4F)",
++	"53.8C (128.8F)",
++	"52.9C (127.2F)",
++	"52.0C (125.6F)",
++	"51.1C (124.1F)",
++	"50.3C (122.5F)",
++	"49.5C (121.0F)",
++	"48.6C (119.5F)",
++	"47.8C (118.1F)",
++	"47.0C (116.6F)",
++	"46.2C (115.2F)",
++	"45.4C (113.8F)",
++	"44.7C (112.4F)",
++	"43.9C (111.0F)",
++	"43.1C (109.6F)",
++	"42.4C (108.3F)",
++	"41.6C (107.0F)",
++	"40.9C (105.6F)",
++	"40.2C (104.3F)",
++	"39.5C (103.0F)",
++	"38.7C (101.7F)",
++	"38.0C (100.5F)",
++	"37.3C (99.2F)",
++	"36.6C (97.9F)",
++	"35.9C (96.7F)",
++	"35.2C (95.4F)",
++	"34.6C (94.2F)",
++	"33.9C (93.0F)",
++	"33.2C (91.8F)",
++	"32.5C (90.5F)",
++	"31.9C (89.3F)",
++	"31.2C (88.1F)",
++	"30.5C (87.0F)",
++	"29.9C (85.8F)",
++	"29.2C (84.6F)",
++	"28.6C (83.4F)",
++	"27.9C (82.2F)",
++	"27.3C (81.1F)",
++	"26.6C (79.9F)",
++	"26.0C (78.7F)",
++	"25.3C (77.6F)",
++	"24.7C (76.4F)",
++	"24.0C (75.2F)",
++	"23.4C (74.1F)",
++	"22.7C (72.9F)",
++	"22.1C (71.8F)",
++	"21.4C (70.6F)",
++	"20.8C (69.4F)",
++	"20.2C (68.3F)",
++	"19.5C (67.1F)",
++	"18.9C (66.0F)",
++	"18.2C (64.8F)",
++	"17.6C (63.7F)",
++	"16.9C (62.5F)",
++	"16.3C (61.3F)",
++	"15.6C (60.2F)",
++	"15.0C (59.0F)",
++	"14.3C (57.8F)",
++	"13.7C (56.6F)",
++	"13.0C (55.4F)",
++	"12.4C (54.2F)",
++	"11.7C (53.0F)",
++	"11.0C (51.8F)",
++	"10.3C (50.6F)",
++	"9.7C (49.4F)",
++	"9.0C (48.2F)",
++	"8.3C (46.9F)",
++	"7.6C (45.7F)",
++	"6.9C (44.4F)",
++	"6.2C (43.1F)",
++	"5.5C (41.9F)",
++	"4.8C (40.6F)",		// value at NTC_MAX (102)
++};
++#endif
++/* Lookup Table for converting NTC value to 10ths of a degree C */
++static int ltc4155_lookup_10thsC_table[] = {
++	694,		// value at NTC_MIN (17)
++	682,
++	670,
++	659,
++	647,
++	636,
++	625,
++	615,
++	605,
++	594,
++	585,
++	575,
++	565,
++	556,
++	547,
++	538,
++	529,
++	520,
++	511,
++	503,
++	495,
++	486,
++	478,
++	470,
++	462,
++	454,
++	447,
++	439,
++	431,
++	424,
++	416,
++	409,
++	402,
++	395,
++	387,
++	380,
++	373,
++	366,
++	359,
++	352,
++	346,
++	339,
++	332,
++	325,
++	319,
++	312,
++	305,
++	299,
++	292,
++	286,
++	279,
++	273,
++	266,
++	260,
++	253,
++	247,
++	240,
++	234,
++	227,
++	221,
++	214,
++	208,
++	202,
++	195,
++	189,
++	182,
++	176,
++	169,
++	163,
++	156,
++	150,
++	143,
++	137,
++	130,
++	124,
++	117,
++	110,
++	103,
++	97,
++	90,
++	83,
++	76,
++	69,
++	62,
++	55,
++	48,		// value at NTC_MAX (102)
++};
++
++
++static const char manufacturer[] = "Linear Technology";
++static char model_name[] = "LTC4155";
++
++static int ltc4155_read_bytes(struct ltc4155_chg *pchg, u8 reg, u8 *data, u8 len)
++{
++	s32 ret;
++
++	mutex_lock(&pchg->xfer_lock);
++	ret = i2c_smbus_read_i2c_block_data(pchg->client, reg, len, data);
++	mutex_unlock(&pchg->xfer_lock);
++
++	return (ret != len) ? -EIO : 0;
++}
++
++static inline int ltc4155_read_byte(struct ltc4155_chg *pchg, u8 reg, u8 *data)
++{
++	return ltc4155_read_bytes(pchg, reg, data, 1);
++}
++
++static int ltc4155_write_byte(struct ltc4155_chg *pchg, u8 reg, u8 data)
++{
++	int ret;
++
++	mutex_lock(&pchg->xfer_lock);
++	ret = i2c_smbus_write_byte_data(pchg->client, reg, data);
++	if (ret != 0) 
++		dev_err(pchg->dev, "I2C write error: %d\n", ret);
++	mutex_unlock(&pchg->xfer_lock);
++
++	return ret;
++}
++
++/*
++ * Configure REG2 Charger Settings with new values
++ * from platform data which can change between USB & AC
++ */ 
++static int ltc4155_update_charger_settings(struct ltc4155_chg *pchg)
++{
++	int ret = -1;
++	
++	/* Update charging parameters from platform data */
++	if (pchg->chg_param) {
++		u8 val, ichg, eoc_level, vfloat;
++		eoc_level = pchg->chg_param->eoc_level;
++		ichg = pchg->chg_param->ichg;
++		vfloat = pchg->chg_param->vfloat;
++		val = (ichg << LTC4155_CHARGE_CURRENT_LIMIT_OFFSET) | (vfloat << LTC4155_VFLOAT_OFFSET) | eoc_level;
++		dev_dbg(pchg->dev, "Configure REG2 charging parameters: 0x%0X\n", val);
++		ret = ltc4155_write_byte(pchg, LTC4155_SUB2, val);
++	}
++	
++	return ret;
++}
++
++static void ltc4155_charger_detect(struct ltc4155_chg *pchg, u8 reg4)
++{
++	struct ltc4155_platform_data *pdata = pchg->pdata;
++
++	/* 
++	 * reg4 holds status of the charger/type & Fault bits
++	 * bit 0 - battery unresponsive (dead?) 
++	 * bit 1 - USB OTG fault
++	 * bit 2 - Over Voltage fault
++	 * bit 3 - Input undervoltage Currrent Limit (Brownout)
++	 * bit 4 - Input current limit status
++	 * bit 5 - 
++	 * bit 5 - Wall good if set
++	 * bit 6 - USB good if set
++	 * bit 7 - external (Wall or USB) good if set 
++	 * 			but never when On-the-go step up is active
++	 * 
++	 * we can have one or both External chargers connected
++	 * as this is a dual-input charger
++	 */
++
++	pchg->wall_charger_online = reg4 & LTC4155_WALLSNSGD ? 1 : 0;
++	pchg->usb_charger_online = reg4 & LTC4155_USBSNSGD ? 1 : 0;
++
++	if (pchg->usb_charger_online) {
++		dev_info(pchg->dev,"LTC4155: USB Charger Connected\n");
++		pchg->chg_param = pdata ? pdata->usb : NULL;
++		wake_unlock(&pchg->wake_lock);
++	}
++
++	if (pchg->wall_charger_online) {
++		dev_info(pchg->dev,"LTC4155: Wall Charger Connected\n");
++		pchg->chg_param = pdata ? pdata->ac : NULL;
++		wake_lock(&pchg->wake_lock);
++	}
++
++	if ( !pchg->wall_charger_online && !pchg->usb_charger_online ) {
++		pchg->wall_charger_online = pchg->usb_charger_online = 0;
++		pchg->chg_param = NULL;
++		dev_info(pchg->dev,"LTC4155: No External power applied\n");
++		wake_unlock(&pchg->wake_lock);
++	} else {
++		; /* Nothing */
++	}
++
++}
++
++/*
++ * Log any error conditions but only when proper bit changes
++ * and keep track of any conditions so we don't continously 
++ * flood the log with the same error 
++ */
++static void ltc4155_error_detect(struct ltc4155_chg *pchg, u8 reg4)
++{
++	u8 reg4_diff;
++
++	/* 
++	 * reg4 holds status of the charger/type & Fault bits
++	 * bit 0 - battery unresponsive (dead?) 
++	 * bit 1 - USB OTG fault
++	 * bit 2 - Over Voltage fault
++	 * bit 3 - Input undervoltage Currrent Limit (Brownout)
++	 * bit 4 - Input current limit status
++	 * bit 5 - 
++	 * bit 5 - Wall good if set
++	 * bit 6 - USB good if set
++	 * bit 7 - external (Wall or USB) good if set 
++	 * 			but never when On-the-go step up is active
++	 */
++
++	/* if any error bits are set: */
++	if (reg4 & 0x1F) {
++	
++		reg4_diff = (reg4 ^ pchg->reg4_saved) & reg4;
++		if (reg4_diff & LTC4155_BAD_CELL)
++			dev_err(pchg->dev,"LTC4155: Bad Battery Detected!\n");
++		if (reg4_diff & LTC4155_OTG_FAULT)
++			dev_err(pchg->dev,"LTC4155: USB OTG Regulator Fault Detected shutdown\n");
++		if (reg4_diff & LTC4155_OVP_ACTIVE)
++			dev_err(pchg->dev,"LTC4155: Over voltage protection fault\n");
++		if (reg4_diff & LTC4155_INPUT_UVCL_ACTIVE)
++			dev_err(pchg->dev,"LTC4155: Input under voltage current limit (brownout) detected\n");
++		if (reg4_diff & LTC4155_AT_ILIM)
++			dev_info(pchg->dev,"LTC4155: Input current limit active\n");
++	}
++
++	/* save the current state for comparison later */	
++	pchg->reg4_saved = reg4;
++
++}
++
++void ltc4155_decode_reg3(struct ltc4155_chg *pchg, u8 reg3)
++{
++	u8 ntc_status;
++	u8 charger_status;
++
++	if ( LTC4155_LOWBAT(reg3) )
++		dev_notice(pchg->dev,"LTC4155: Low battery voltage detected\n");
++	
++	ntc_status = LTC4155_NTCSTAT(reg3);
++	dev_dbg(pchg->dev,"NTC Status = %d\n", ntc_status);
++	switch (ntc_status) {
++		case LTC4155_NTCSTAT_PRESET_NORMAL :
++			dev_dbg(pchg->dev,"LTC4155: NTC normal\n");
++			break;
++		case LTC4155_NTCSTAT_PRESET_TOO_COLD :
++			dev_notice(pchg->dev,"LTC4155: NTC Too Cold\n");
++			break;
++		case LTC4155_NTCSTAT_PRESET_TOO_WARM :
++			dev_notice(pchg->dev,"LTC4155: NTC Too Warm\n");
++			break;
++		case LTC4155_NTCSTAT_PRESET_HOT_FAULT :
++			dev_err(pchg->dev,"LTC4155: NTC Hot Fault\n");
++			break;
++	}
++
++	if ( LTC4155_EN_BOOST(reg3) )
++		dev_info(pchg->dev,"LTC4155: OTG Enabled\n");
++
++	if ( LTC4155_ID_DETECT(reg3) )
++		dev_info(pchg->dev,"LTC4155: OTG ID Detected\n");
++
++	charger_status = LTC4155_CHARGER_STATUS(reg3);
++	dev_dbg(pchg->dev,"Charger Status = %d\n", charger_status);
++	switch (charger_status) {
++		case LTC4155_CHARGER_STATUS_PRESET_CHARGER_OFF :
++			dev_info(pchg->dev,"LTC4155: Charger Off\n");
++			break;
++		case LTC4155_CHARGER_STATUS_PRESET_LOW_BAT :
++			dev_info(pchg->dev,"LTC4155: Charger Low Battery\n");
++			break;
++		case LTC4155_CHARGER_STATUS_PRESET_CONSTANT_CURRENT :
++			dev_dbg(pchg->dev,"LTC4155: Charger constant current\n");
++			break;
++		case LTC4155_CHARGER_STATUS_PRESET_CONSTANT_VOLTAGE_COMA__I_GRTR_THN_C_DIV_X :
++			dev_dbg(pchg->dev,"LTC4155: Charger constant voltage vprog > vc/x\n");
++			break;
++		case LTC4155_CHARGER_STATUS_PRESET_CONSTANT_VOLTAGE_COMA__I_LSS_THN_C_DIV_X :
++			dev_dbg(pchg->dev,"LTC4155: Charger constant voltage vprog < vc/x\n");
++			break;
++		case LTC4155_CHARGER_STATUS_PRESET_NTC_TOO_WARM_TO_CHARGE :
++			dev_info(pchg->dev,"LTC4155: Charger too Warm to charge - charging paused\n");
++			break;
++		case LTC4155_CHARGER_STATUS_PRESET_NTC_TOO_COLD_TO_CHARGE :
++			dev_info(pchg->dev,"LTC4155: Charger too Cold to charge - charging paused\n");
++			break;
++		case LTC4155_CHARGER_STATUS_PRESET_NTC_CRITICALLY_HOT :
++			dev_info(pchg->dev,"LTC4155: Charger Critically Hot! - charging paused\n");
++			break;
++	}
++
++}	
++
++/* 
++ * kernel work function to handle the interrupt.
++ * 
++ * We come here when an interrupt occurs which is
++ * currently only enabled for changes in External Power 
++ * Available which happens when A/C or USB charger is 
++ * connected or disconnected.
++ * 
++ * The 3 read-only status registers: REG3, REG4, REG5
++ * are frozen until the interrupt is cleared by
++ * writing to the LTC4155_IMR register again.
++ * 
++ * In this case we really only care about REG4 which
++ * holds the status of the charger(s) either
++ * connected/disconnected. 
++ * 
++ * NOTE: The device will generate 2 IRQ's when a
++ * charger is attached/detached once for the type of charger
++ * (bits 5 & 6) and another for Exernal Power (Wall or USB)
++ * good (bit 7)
++ * 
++ * When this happens we need to do 2 things:
++ *  - configure the charger parameters for A/C or USB as
++ * 		required (which can be different)
++ *  - update the status of the chargers through the 
++ * 		power_supply_changed() function.
++ * 
++ * We could also handle/display error conditions to 
++ * the log if desired 
++ * 
++*/
++static void ltc4155_read_input(struct ltc4155_chg *pchg)
++{
++	u8 reg4;
++
++	/* 
++	 * the 3 read-only status registers 3,4,5 are frozen until the interrupt
++	 * is cleared by writing the the LTC4155_IMR register again.
++	 * we currently only really care about reg4
++	 */
++	if ( ltc4155_read_byte(pchg, LTC4155_SUB4, &reg4) ) {
++		dev_err(pchg->dev, "can not read LTC4144 register 4\n");
++		return;
++	}
++	dev_dbg(pchg->dev,"LTC4155 IRQ reg4 = 0x%02X\n", reg4);
++
++
++	/* clear/configure interrupts by writing to LTC4155_IMR register */
++	if ( ltc4155_write_byte(pchg, LTC4155_IMR, LTC4155_EXTPOWER_INT) ) {
++		dev_err(pchg->dev, "can not write IMR registers\n");
++		return;
++	}
++	
++	/* now read live values again: */	
++	ltc4155_read_byte(pchg, LTC4155_SUB4, &reg4);
++	dev_dbg(pchg->dev,"LTC4155 Live reg4 = 0x%02X\n", reg4);
++
++	/* if the Reg4 charger-type bits 5-6 change we need to reload charger settings */
++	if ( (reg4 & (LTC4155_WALLSNSGD|LTC4155_USBSNSGD)) ^ (pchg->reg4_cached & (LTC4155_WALLSNSGD|LTC4155_USBSNSGD)) ) {
++		ltc4155_charger_detect(pchg, reg4);
++		dev_dbg(pchg->dev,"Compare 0x%02X = 0x%02X\n", (reg4 & 0x60), (pchg->reg4_cached & 0x60));
++		/* only do update if a charger is actually connected though (set during detection) */
++		if (pchg->chg_param) {
++			/* Update charging parameters from platform data */
++			if ( ltc4155_update_charger_settings(pchg) )
++				dev_err(pchg->dev, "can not update REG2 charger settings\n");
++		}
++		pchg->reg4_cached = reg4;
++	}
++	
++	/* Display any error conditions found */
++	ltc4155_error_detect(pchg, reg4);
++
++#if 0
++	/* For now we do not enable IRQ for changes in reg3/reg5 so skip this 
++	 * as it has a tendecy to flood the logs with redundant information.
++	 * we should update this for error conditions and commicate that back up.
++	*/
++	u8 reg3, reg4, reg5;
++	u8 ntc_val = 0;
++
++	ltc4155_read_byte(pchg, LTC4155_SUB3, &reg3);
++	dev_dbg(pchg->dev,"LTC4155 Live reg3 = 0x%02X\n", reg3);
++	if ( reg3 != pchg->reg3_cached ) {
++		dev_dbg(pchg->dev,"LTC4155: reg3 cached 0x%02X vs 0x%02X\n", pchg->reg3_cached, reg3);		
++		pchg->reg3_cached = reg3;
++		ltc4155_decode_reg3(pchg, reg3);
++	}
++
++	ltc4155_read_byte(pchg, LTC4155_SUB5, &reg5);
++	if (reg5 & LTC4155_NTC_ERROR) {
++		dev_warn(pchg->dev, "LTC4155: NTC Temperature is out of range for charging\n");
++		ntc_val = reg5 >> 1;
++		if ( (ntc_val < NTC_MIN) || (ntc_val > NTC_MAX) ) {
++			dev_warn(pchg->dev, "NTC value is out of range for table\n");
++		} else {	
++			dev_info(pchg->dev, "Battery temperature at %s\n", ltc4155_lookup_table[ntc_val - NTC_MIN]);
++		}
++	}
++#endif
++
++	power_supply_changed(pchg->psy->ac);
++	power_supply_changed(pchg->psy->usb);
++
++}
++
++static void ltc4155_delayed_func(struct work_struct *_work)
++{
++	struct ltc4155_chg *pchg = container_of(_work, struct ltc4155_chg,
++						work.work);
++	
++	/* perform the actual read and send status updates to sub-system */
++	ltc4155_read_input(pchg);
++
++	/* Re-enable the interrupts from the device */
++	enable_irq(pchg->irq);
++}	
++
++static irqreturn_t ltc4155_isr_func(int irq, void *ptr)
++{
++	struct ltc4155_chg *pchg = ptr;
++
++	dev_dbg(pchg->dev,"-->LTC4155 IRQ");
++	/*
++	 * Disable further interrupts from the device
++	 * Note that, we assume that the device is configured
++	 * to operate in  Mode1 where the interrupt line is
++	 * pulled low until the IMR register is written
++	 * again. Since the irq is configured as
++	 * edge sensitive for falling edge, we explicitly disable
++	 * further interrupts from the device until we finish
++	 * processing all the messages from the bottom half and
++	 * re-enable it from the bottom half.
++	 */
++	disable_irq_nosync(pchg->irq);
++	schedule_delayed_work(&pchg->work, pchg->debounce_jiffies);
++	return IRQ_HANDLED;
++}
++
++static int ltc4155_pm_suspend(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct ltc4155_chg *pchg = i2c_get_clientdata(client);
++
++	if (pchg) {
++		enable_irq_wake(pchg->irq);
++		cancel_delayed_work(&pchg->work);
++	}
++	return 0;
++}
++
++static int ltc4155_pm_resume(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct ltc4155_chg *pchg = i2c_get_clientdata(client);
++	
++	if (pchg) {
++		disable_irq_wake(pchg->irq);
++		disable_irq_nosync(pchg->irq);
++		schedule_delayed_work(&pchg->work, pchg->debounce_jiffies);
++	}
++
++	/* Things may have changed while suspended so alert upper layer */
++	power_supply_changed(pchg->psy->ac);
++	power_supply_changed(pchg->psy->usb);
++
++	return 0;
++}
++
++static SIMPLE_DEV_PM_OPS(ltc4155_pm_ops, ltc4155_pm_suspend, ltc4155_pm_resume);
++
++static int ltc4155_setup_irq(struct ltc4155_chg *pchg)
++{
++	int ret;
++	int irq = pchg->client->irq;
++
++	if (irq <= 0) {
++		dev_warn(pchg->dev, "invalid irq number: %d\n", irq);
++		return 0;
++	}
++
++	INIT_DELAYED_WORK(&pchg->work, ltc4155_delayed_func);
++
++	ret = request_irq(irq,	ltc4155_isr_func,
++				IRQF_TRIGGER_FALLING, "ltc4155_irq", pchg);
++
++	if (ret)
++		return ret;
++
++	pchg->irq = irq;
++	pchg->debounce_jiffies = msecs_to_jiffies(pchg->pdata->debounce_msec);
++
++	/* clear & configure interrupts by writing to LTC4155_IMR register */
++	ret = ltc4155_write_byte(pchg, LTC4155_IMR, LTC4155_EXTPOWER_INT);
++	if (ret)
++		return ret;
++
++	return 0;
++}
++
++static void ltc4155_release_irq(struct ltc4155_chg *pchg)
++{
++	cancel_delayed_work_sync(&pchg->work);
++
++	if (pchg->irq)
++		free_irq(pchg->irq, pchg);
++}
++
++static int ltc4155_init_device(struct ltc4155_chg *pchg)
++{
++	u8 val;
++	int ret;
++	struct ltc4155_platform_data *pdata = pchg->pdata;
++
++	dev_info(pchg->dev, "LTC 4155 Dual-Input Battery Charger driver version %s\n", DRIVER_VERSION);
++	
++	/* read reg4 to get current status */
++	ret = ltc4155_read_byte(pchg, LTC4155_SUB4, &val);
++	ltc4155_charger_detect(pchg, val);
++	ltc4155_error_detect(pchg, val);
++	pchg->reg4_cached = val;
++	pchg->reg4_saved = 0;
++
++	/* read reg3 to get current status */
++	ltc4155_read_byte(pchg, LTC4155_SUB3, &val);
++	pchg->reg3_cached = val;
++
++	/* Configure charging parameters from platform data, 
++	 * 	configure for USB even if not yet connected 
++	 */
++	pchg->chg_param = pdata->usb;
++	if ( (ret = ltc4155_update_charger_settings(pchg)) )
++		dev_err(pchg->dev, "can not write REG2 charger settings\n");
++
++	return ret;
++}
++
++static enum power_supply_property ltc4155_charger_prop[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_TEMP,
++	/* Properties of type `const char *' */
++	POWER_SUPPLY_PROP_MANUFACTURER,
++	POWER_SUPPLY_PROP_MODEL_NAME
++};
++
++static char *battery_supplied_to[] = {
++	"main_batt",
++};
++
++static int ltc4155_charger_get_ac_property(struct power_supply *psy,
++				       enum power_supply_property psp,
++				       union power_supply_propval *val)
++{
++	u8 reg5;
++	u8 ntc_val = 0;
++	struct ltc4155_chg *pchg = dev_get_drvdata(psy->dev.parent);
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_ONLINE:
++		val->intval = 0;
++		if (pchg->wall_charger_online) 
++			val->intval = 1;
++		break;
++	case POWER_SUPPLY_PROP_TEMP:
++		ltc4155_read_byte(pchg, LTC4155_SUB5, &reg5);
++		ntc_val = reg5 >> 1;
++		if ( (ntc_val < NTC_MIN) || (ntc_val > NTC_MAX) ) {
++			dev_warn(pchg->dev, "NTC value is out of range for table\n");
++			val->intval = 0;
++		} else {
++			val->intval = ltc4155_lookup_10thsC_table[ntc_val - NTC_MIN];
++		}
++		break;
++	case POWER_SUPPLY_PROP_MANUFACTURER:
++		val->strval = manufacturer;
++		break;
++	case POWER_SUPPLY_PROP_MODEL_NAME:
++		val->strval = model_name;
++		break;
++	default: 
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int ltc4155_charger_get_usb_property(struct power_supply *psy,
++				       enum power_supply_property psp,
++				       union power_supply_propval *val)
++{
++	u8 reg5;
++	u8 ntc_val = 0;
++	struct ltc4155_chg *pchg = dev_get_drvdata(psy->dev.parent);
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_ONLINE:
++		val->intval = 0;
++		if (pchg->usb_charger_online) 
++			val->intval = 1;
++		break;
++	case POWER_SUPPLY_PROP_TEMP:
++		ltc4155_read_byte(pchg, LTC4155_SUB5, &reg5);
++		ntc_val = reg5 >> 1;
++		if ( (ntc_val < NTC_MIN) || (ntc_val > NTC_MAX) ) {
++			dev_warn(pchg->dev, "NTC value is out of range for table\n");
++			val->intval = 0;
++		} else {
++			val->intval = ltc4155_lookup_10thsC_table[ntc_val - NTC_MIN];
++		}
++		break;
++	case POWER_SUPPLY_PROP_MANUFACTURER:
++		val->strval = manufacturer;
++		break;
++	case POWER_SUPPLY_PROP_MODEL_NAME:
++		val->strval = model_name;
++		break;
++	default: 
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static const struct power_supply_desc ltc4155_ac_desc = {
++	.name = "ac",
++	.type = POWER_SUPPLY_TYPE_MAINS,
++	.properties = ltc4155_charger_prop,
++	.num_properties = ARRAY_SIZE(ltc4155_charger_prop),
++	.get_property = ltc4155_charger_get_ac_property,
++};
++
++static const struct power_supply_desc ltc4155_usb_desc = {
++	.name			= "usb",
++	.type			= POWER_SUPPLY_TYPE_USB,
++	.properties		= ltc4155_charger_prop,
++	.num_properties		= ARRAY_SIZE(ltc4155_charger_prop),
++	.get_property		= ltc4155_charger_get_usb_property,
++};
++
++static int ltc4155_register_psy(struct ltc4155_chg *pchg)
++{
++	struct ltc4155_psy *psy;
++	struct power_supply_config psy_cfg = {};
++
++	psy = devm_kzalloc(pchg->dev, sizeof(*psy), GFP_KERNEL);
++	if (!psy)
++		return -ENOMEM;
++
++	pchg->psy = psy;
++
++	psy_cfg.supplied_to = battery_supplied_to;
++	psy_cfg.num_supplicants = ARRAY_SIZE(battery_supplied_to);
++
++	psy->ac = power_supply_register(pchg->dev, &ltc4155_ac_desc, &psy_cfg);
++	if (IS_ERR(psy->ac))
++		goto err_psy_ac;
++
++	psy->usb = power_supply_register(pchg->dev, &ltc4155_usb_desc,
++					 &psy_cfg);
++	if (IS_ERR(psy->usb))
++		goto err_psy_usb;
++
++	return 0;
++
++	power_supply_unregister(psy->usb);
++err_psy_usb:
++	power_supply_unregister(psy->ac);
++err_psy_ac:
++	return -EPERM;
++}
++
++static void ltc4155_unregister_psy(struct ltc4155_chg *pchg)
++{
++	struct ltc4155_psy *psy = pchg->psy;
++
++	if (!psy)
++		return;
++
++	power_supply_unregister(psy->ac);
++	power_supply_unregister(psy->usb);
++}
++
++static struct ltc4155_platform_data *ltc4155_parse_dt_data(struct i2c_client *client)
++{
++	struct ltc4155_platform_data *pdata;
++	struct device_node *np = client->dev.of_node;
++	u32 val;
++	int ret;
++
++	dev_info(&client->dev, "%s\n", __func__);
++	pdata = devm_kzalloc(&client->dev, sizeof(*pdata), GFP_KERNEL);
++	if (!pdata) {
++		dev_err(&client->dev,
++			"Memory alloc for ltc4155 pdata failed\n");
++		return NULL;
++	}
++	pdata->ac = devm_kzalloc(&client->dev, sizeof(struct ltc4155_chg_param), GFP_KERNEL);
++	if (!pdata) {
++		dev_err(&client->dev,
++			"Memory alloc for ltc4155 pdata.ac failed\n");
++		return NULL;
++	}
++	pdata->usb = devm_kzalloc(&client->dev, sizeof(struct ltc4155_chg_param), GFP_KERNEL);
++	if (!pdata) {
++		dev_err(&client->dev,
++			"Memory alloc for ltc4155 pdata.usb failed\n");
++		return NULL;
++	}
++	
++	/* Set defaults */
++	pdata->ac->eoc_level = LTC4155_EOC_10P; 	// full capacity charge indication threshold (default)
++	pdata->ac->ichg = LTC4155_ICHG_100P;		// limit input current to 100% (default)
++	pdata->ac->vfloat = LTC4155_EOC_4_20V;		// set battery float voltage to 4.20V
++	
++	pdata->usb->eoc_level = LTC4155_EOC_10P; 	// full capacity charge indication threshold (default)
++	pdata->usb->ichg = LTC4155_ICHG_100P;		// limit input current to 100% (default)
++	pdata->usb->vfloat = LTC4155_EOC_4_20V;		// set battery float voltage to 4.20V
++
++	ret = of_property_read_u32(np, "debounce_delay", &val);
++	if (ret) {
++		dev_err(&client->dev, "debounce_delay invalid, using default\n");
++		val = DEFAULT_POLL_DELAY;
++	}
++	pdata->debounce_msec = val;
++	
++	/* get A/C charger configuration settings */
++	ret = of_property_read_u32(np, "eoc_level_ac", &val);
++	if (!ret)
++		pdata->ac->eoc_level = val;
++
++	ret = of_property_read_u32(np, "ilimit_ac", &val);
++	if (!ret)
++		pdata->ac->ichg = val;
++
++	ret = of_property_read_u32(np, "vloat_ac", &val);
++	if (!ret)
++		pdata->ac->vfloat = val;
++
++	/* get USB charger configuration settings */
++	ret = of_property_read_u32(np, "eoc_level_usb", &val);
++	if (!ret)
++		pdata->usb->eoc_level = val;
++
++	ret = of_property_read_u32(np, "ilimit_usb", &val);
++	if (!ret)
++		pdata->usb->ichg = val;
++
++	ret = of_property_read_u32(np, "vloat_usb", &val);
++	if (!ret)
++		pdata->usb->vfloat = val;
++
++	return pdata;
++}
++
++static int ltc4155_probe(struct i2c_client *client, const struct i2c_device_id *id)
++{
++	struct ltc4155_chg *charger;
++	struct i2c_adapter *adapter;
++	int ret;
++
++	dev_info(&client->dev, "%s\n", __func__);
++	adapter = to_i2c_adapter(client->dev.parent);
++	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_I2C_BLOCK))
++		return -EIO;
++
++	charger = devm_kzalloc(&client->dev, sizeof(*charger), GFP_KERNEL);
++	if (!charger)
++		return -ENOMEM;
++
++	charger->client = client;
++	charger->dev = &client->dev;
++	charger->pdata = client->dev.platform_data;
++
++	if (IS_ENABLED(CONFIG_OF) && !charger->pdata && client->dev.of_node)
++		charger->pdata = ltc4155_parse_dt_data(client);
++
++	if (!charger->pdata) {
++		dev_err(&client->dev, "no platform data provided\n");
++		return -EINVAL;
++	}
++
++	i2c_set_clientdata(client, charger);
++
++	mutex_init(&charger->xfer_lock);
++
++	wake_lock_init(&charger->wake_lock, WAKE_LOCK_SUSPEND, "dock");
++
++	ret = ltc4155_init_device(charger);
++	if (ret) {
++		dev_err(charger->dev, "i2c communication err: %d", ret);
++		return ret;
++	}
++
++	ret = ltc4155_register_psy(charger);
++	if (ret) {
++		dev_err(charger->dev, "power supplies register err: %d", ret);
++		return ret;
++	}
++
++	ret = ltc4155_setup_irq(charger);
++	if (ret) {
++		dev_err(charger->dev, "irq handler err: %d", ret);
++		ltc4155_unregister_psy(charger);
++		return ret;
++	}
++
++	return 0;
++}
++
++static int ltc4155_remove(struct i2c_client *cl)
++{
++	struct ltc4155_chg *pchg = i2c_get_clientdata(cl);
++
++	if (pchg->pdata) {
++		kfree(pchg->pdata->ac);
++		kfree(pchg->pdata->usb);
++		kfree(pchg->pdata);
++	}	
++
++	ltc4155_release_irq(pchg);
++	ltc4155_unregister_psy(pchg);
++	return 0;
++}
++
++static const struct i2c_device_id ltc4155_ids[] = {
++	{"ltc4155", 0},
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, ltc4155_ids);
++
++static const struct of_device_id ltc4155_match_ids[] = {
++	{ .compatible = "ltc,ltc4155", },
++	{ /* end */ }
++};
++MODULE_DEVICE_TABLE(of, ltc4155_match_ids);
++
++static struct i2c_driver ltc4155_driver = {
++	.probe = ltc4155_probe,
++	.remove = ltc4155_remove,
++	.id_table = ltc4155_ids,
++	.driver = {
++		   .name = "ltc4155",
++			.owner = THIS_MODULE,
++			.pm	= &ltc4155_pm_ops,
++			.of_match_table = ltc4155_match_ids,
++	},
++};
++
++module_i2c_driver(ltc4155_driver);
++
++MODULE_DESCRIPTION("Linear Tech LTC4155 charger driver");
++MODULE_AUTHOR("David Kilp <david.kilp@crossmatch.com>");
++MODULE_LICENSE("GPL");
+diff --git a/include/dt-bindings/power/ltc4155.h b/include/dt-bindings/power/ltc4155.h
+new file mode 100644
+index 0000000..bc3b0eb
+--- /dev/null
++++ b/include/dt-bindings/power/ltc4155.h
+@@ -0,0 +1,45 @@
++#ifndef __DT_LTC4155_H
++#define __DT_LTC4155_H
++
++/*
++ * These definitions must match those defined for <linux/power/ltc4155.h>
++ */
++
++/*
++ * Full Capacity Charge Indication Threshold
++ * 	as % Full-Scale current 
++ */
++#define	LTC4155_EOC_10P		(0)	// default value
++#define	LTC4155_EOC_20P		(1)
++#define	LTC4155_EOC_2P		(2)
++#define	LTC4155_EOC_5P		(3)
++
++/*
++ * Battery Charger Float Voltage (when battery is charged)
++ */
++#define	LTC4155_EOC_4_05V	(0)		// default value
++#define	LTC4155_EOC_4_10V	(1)
++#define	LTC4155_EOC_4_15V	(2)
++#define	LTC4155_EOC_4_20V	(3)
++
++/*
++ * Battery Charger Current Limit as % of 100 (default)
++ */
++#define	LTC4155_ICHG_DISABLED	(0)	// Charger disabled
++#define	LTC4155_ICHG_12_50P		(1)	// limit to 12.50 %
++#define	LTC4155_ICHG_18_75P		(2)
++#define	LTC4155_ICHG_25_00P		(3)
++#define	LTC4155_ICHG_31_25P		(4)
++#define	LTC4155_ICHG_37_50P		(5)
++#define	LTC4155_ICHG_43_75P		(6)
++#define	LTC4155_ICHG_50_00P		(7)
++#define	LTC4155_ICHG_56_25P		(8)
++#define	LTC4155_ICHG_62_50P		(9)
++#define	LTC4155_ICHG_68_77P		(10)
++#define	LTC4155_ICHG_75_00P		(11)
++#define	LTC4155_ICHG_81_25P		(12)
++#define	LTC4155_ICHG_87_50P		(13)
++#define	LTC4155_ICHG_93_75P		(14)
++#define	LTC4155_ICHG_100P		(15) 	// default 
++
++#endif /* __DT_LTC4155_H */
+diff --git a/include/linux/power/ltc4155.h b/include/linux/power/ltc4155.h
+new file mode 100644
+index 0000000..b741965
+--- /dev/null
++++ b/include/linux/power/ltc4155.h
+@@ -0,0 +1,81 @@
++/*
++ * LTC4155 Dual-Input Battery Charger
++ *
++ *			Copyright (C) 2014 Cross Match Technologies
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++#ifndef _LTC4155_H
++#define _LTC4155_H
++
++/*
++ * Full Capacity Charge Indication Threshold
++ * 	as % Full-Scale current 
++ */
++enum ltc4155_eoc_level {
++	LTC4155_EOC_10P,	// default value
++	LTC4155_EOC_20P,	
++	LTC4155_EOC_2P,
++	LTC4155_EOC_5P,
++};
++
++/*
++ * Battery Charger Float Voltage (when battery is charged)
++ */
++enum ltc4155_bat_float_v {
++	LTC4155_EOC_4_05V,		// default value
++	LTC4155_EOC_4_10V,
++	LTC4155_EOC_4_15V,
++	LTC4155_EOC_4_20V,
++};
++
++/*
++ * Battery Charger Current Limit as % of 100 (default)
++ */
++enum ltc4155_ichg {
++	LTC4155_ICHG_DISABLED,	// Charger disabled
++	LTC4155_ICHG_12_50P,	// limit to 12.50 %
++	LTC4155_ICHG_18_75P,
++	LTC4155_ICHG_25_00P,
++	LTC4155_ICHG_31_25P,
++	LTC4155_ICHG_37_50P,
++	LTC4155_ICHG_43_75P,
++	LTC4155_ICHG_50_00P,
++	LTC4155_ICHG_56_25P,
++	LTC4155_ICHG_62_50P,
++	LTC4155_ICHG_68_77P,
++	LTC4155_ICHG_75_00P,
++	LTC4155_ICHG_81_25P,
++	LTC4155_ICHG_87_50P,
++	LTC4155_ICHG_93_75P,
++	LTC4155_ICHG_100P,		// default 
++
++};
++
++/**
++ * struct ltc4155_chg_param
++ * @eoc_level : end of charge level setting
++ * @ichg      : charging current
++ */
++struct ltc4155_chg_param {
++	enum ltc4155_eoc_level eoc_level;
++	enum ltc4155_ichg ichg;
++	enum ltc4155_bat_float_v vfloat;
++};
++
++/**
++ * struct ltc4155_platform_data
++ * @ac                : charging parameters for AC type charger
++ * @usb               : charging parameters for USB type charger
++ * @debounce_msec     : interrupt debounce time
++ */
++struct ltc4155_platform_data {
++	struct ltc4155_chg_param *ac;
++	struct ltc4155_chg_param *usb;
++	unsigned int debounce_msec;
++};
++
++#endif
+-- 
+2.9.5
+
