@@ -52,7 +52,7 @@ index bc55631c5b..0a39eb191f 100644
  CONFIG_DFU_SF=y
  CONFIG_DM_GPIO=y
 diff --git a/include/configs/am43xx_evm.h b/include/configs/am43xx_evm.h
-index 6e2cf7b9ec..5709a93ceb 100644
+index 6e2cf7b9ec..de66a34ef6 100644
 --- a/include/configs/am43xx_evm.h
 +++ b/include/configs/am43xx_evm.h
 @@ -123,6 +123,19 @@
@@ -86,11 +86,15 @@ index 6e2cf7b9ec..5709a93ceb 100644
  /* NAND: device related configs */
  #define CONFIG_SYS_NAND_PAGE_SIZE	4096
  #define CONFIG_SYS_NAND_OOBSIZE		224
-@@ -280,7 +297,7 @@
+@@ -279,8 +296,10 @@
+ 	"nandargs=setenv bootargs console=${console} " \
  		"${optargs} " \
  		"root=${nandroot} " \
- 		"rootfstype=${nandrootfstype}\0" \
+-		"rootfstype=${nandrootfstype}\0" \
 -	"nandroot=ubi0:rootfs rw ubi.mtd=NAND.file-system,4096\0" \
++		"rootfstype=${nandrootfstype} " \
++		"${nandoptargs}\0" \
++	"nandoptargs=ubi.mtd=NAND.data\0" \
 +	"nandroot=ubi0:rootfs rw ubi.mtd=NAND.file-system\0" \
  	"nandrootfstype=ubifs rootwait=1\0" \
  	"nandboot=echo Booting from nand ...; " \
