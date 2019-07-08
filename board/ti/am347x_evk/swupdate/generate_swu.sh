@@ -168,7 +168,7 @@ for i in $FILES;do
 
 # Remove temp files from images directory
 echo "Removing swupdate temp files"
-#/bin/rm -f sw-description swupdate-priv.pem sw-description.sig
+/bin/rm -f sw-description swupdate-priv.pem sw-description.sig
 
 echo "Update file created: ${PRODUCT_NAME}_${CONTAINER_VER}.swu"
 
