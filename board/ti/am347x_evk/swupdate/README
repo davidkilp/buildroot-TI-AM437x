@@ -1,0 +1,71 @@
+Public/Private Keys used to sign a swupdate package:
+
+* Create the private key
+
+$ openssl genrsa -out swupdate-priv.pem
+
+
+* Create the public key
+
+$ openssl rsa -in swupdate-priv.pem -out swupdate-public.pem -outform PEM -pubout
+
+
+generate_swu.sh -- shell script used to create the software update file.
+
+
+===== Required target files: 
+
+ * /etc/swupdate-public.pem
+ * /etc/swupdate.cfg
+
+The public key,swupdate-public.pem, must be installed on the original
+firmware image 
+
+
+===== Updating U-boot:
+
+The /etc/swupdate.cfg file should have a "versions" information block that will
+be used by the "install-if-different" tag to decide if u-boot should be
+updated or not. This is NOT normally updated so to prevent bricking the
+device we should not normally update u-boot.
+
+The "versions" block in the /etc/swupdate.cfg will look like this:
+versions : (
+	{
+		name = "bootloader";
+		version = "Pocket-1.00";
+	}
+);
+
+
+The generated sw-description file, which is created using the "generate_swu.sh" 
+script to create the .swu output file. It should have a block that looks
+like this for updating u-boot: 
+
+			/* Optional U-boot update */
+			images: (
+				{
+					filename = "u-boot.img";
+					device = "mtd5";
+					name = "bootloader";
+					version = "Pocket-1.00";
+					install-if-different = true;
+					sha256 = "f9d053f040346e47dec042d07cf77affb101a218ce6edbabb239a935977322d4";
+				}
+
+
+where the version information here will be compared against that from
+the /etc/swupdate.cfg versions block. If they are different, then the u-boot
+image will be updated. If they match then the u-boot update will be skipped.
+
+If you need to update u-boot then you need to edit the files: 
+
+	- <buildroot>/buildroot/board/ti/am347x_evk/swupdate/generate_swu.sh 
+	- <buildroot>/buildroot/board/ti/am347x_evk/rootfs_overlay/etc/swupdate.cfg
+	
+and edit the bootloader version information so that they match. 
+If they values do NOT match then u-boot will be updated to that in the .swu file.
+
+
+
+

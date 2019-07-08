@@ -1,0 +1,43 @@
+diff --git a/arch/arm/boot/dts/am437x-gp-evm.dts b/arch/arm/boot/dts/am437x-gp-evm.dts
+index b8bb5569f97f..591b49ae8460 100644
+--- a/arch/arm/boot/dts/am437x-gp-evm.dts
++++ b/arch/arm/boot/dts/am437x-gp-evm.dts
+@@ -725,6 +725,13 @@
+ 			};
+ 		};
+ 	};
++
++	eeprom@50 {
++		compatible = "atmel,24c256";
++		reg = <0x50>;
++		pagesize = <64>;
++	};
++
+ };
+ 
+ &i2c1 {
+@@ -1032,7 +1039,23 @@
+ 		};
+ 		partition@9 {
+ 			label = "NAND.file-system";
+-			reg = <0x00a00000 0x1f600000>;
++			reg = <0x00a00000 0x08000000>;
++		};
++		partition@10 {
++			label = "NAND.kernel2";
++			reg = <0x08a00000 0x00700000>;
++		};
++		partition@11 {
++			label = "NAND.file-system2";
++			reg = <0x09100000 0x08000000>;
++		};
++		partition@12 {
++			label = "NAND.recovery";
++			reg = <0x11100000 0x03200000>;
++		};
++		partition@13 {
++			label = "NAND.data";
++			reg = <0x14300000 0x0BD00000>;
+ 		};
+ 	};
+ };

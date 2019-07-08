@@ -1,0 +1,38 @@
+diff --git a/conf/umtprd-ffs.sh b/conf/umtprd-ffs.sh
+index 9b87b0d..8b074d1 100644
+--- a/conf/umtprd-ffs.sh
++++ b/conf/umtprd-ffs.sh
+@@ -3,6 +3,13 @@
+ # FunctionFS uMTPrd startup example/test script
+ # Must be launched from a writable/temporary folder.
+ 
++# if we have an argument to script use it as a path to writeable directory
++if [ $# -eq 1 ]
++then
++	echo "Running from: $1 "
++	cd $1
++fi
++
+ modprobe libcomposite
+ 
+ mkdir cfg
+@@ -24,8 +31,8 @@ echo 0x0100 > idProduct
+ echo 0x1D6B > idVendor
+ 
+ echo "01234567" > strings/0x409/serialnumber
+-echo "Viveris Technologies" > strings/0x409/manufacturer
+-echo "The Viveris Product !" > strings/0x409/product
++echo "Crossmatch Technologies" > strings/0x409/manufacturer
++echo "Pocket-30" > strings/0x409/product
+ 
+ echo "Conf 1" > configs/c.1/strings/0x409/configuration
+ echo 120 > configs/c.1/MaxPower
+@@ -35,7 +42,7 @@ ln -s functions/ffs.umtp configs/c.1
+ #ln -s functions/acm.usb0 configs/c.1
+ 
+ mkdir /dev/ffs-umtp
+-mount -t functionfs mtp /dev/ffs-umtp
++mount -t functionfs umtp /dev/ffs-umtp
+ # Start the umtprd service
+ umtprd &
+ 

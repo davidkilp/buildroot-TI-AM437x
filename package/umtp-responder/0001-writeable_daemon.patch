@@ -1,0 +1,41 @@
+diff --git a/conf/S98uMTPrd b/conf/S98uMTPrd
+old mode 100644
+new mode 100755
+index 2405fb5..efe655e
+--- a/conf/S98uMTPrd
++++ b/conf/S98uMTPrd
+@@ -2,8 +2,8 @@
+ 
+ GADGETFS_PATH=/dev/gadget
+ UMTPRD_DAEMON_NAME=uMTPrd
+-UMTPRD_DAEMON_PATH=/usr/bin/umtprd.sh
+-UMTPRD_DAEMON_OPTS=
++UMTPRD_DAEMON_PATH=/usr/bin/umtprd-ffs.sh
++UMTPRD_DAEMON_OPTS="/tmp"
+ UMTPRD_DAEMON_USER=root
+ 
+ case "$1" in
+@@ -12,16 +12,18 @@ case "$1" in
+     if [ ! -f "$GADGETFS_PATH" ]; then
+       mkdir $GADGETFS_PATH
+     fi
++    # must start daemon in writeable directory (/tmp) and create transfer directory (/tmp/update)
++    mkdir -p /tmp/update
+     mount -t gadgetfs gadgetfs $GADGETFS_PATH
+-    start-stop-daemon -S --background --name $UMTPRD_DAEMON_NAME \
+-                                      --chuid $UMTPRD_DAEMON_USER \
+-                                      --exec $UMTPRD_DAEMON_PATH \
+-                                      -- $UMTPRD_DAEMON_OPTS
++    $UMTPRD_DAEMON_PATH $UMTPRD_DAEMON_OPTS &
++    #start-stop-daemon -S --background --exec $UMTPRD_DAEMON_PATH -- $UMTPRD_DAEMON_OPTS
+     echo "DONE"
+   ;;
+   stop)
+     printf -n "Stop uMTPrd deamon :"
+-    start-stop-daemon --name $UMTPRD_DAEMON_NAME --K -s 9
++    umount /dev/gadget/
++    killall umtprd
++    #start-stop-daemon --name $UMTPRD_DAEMON_NAME --K -s 9
+     echo " DONE"
+     ;;
+   restart|reload)

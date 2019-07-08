@@ -1,0 +1,97 @@
+diff --git a/arch/arm/dts/am437x-gp-evm.dts b/arch/arm/dts/am437x-gp-evm.dts
+index 142bfc52a1..d90b962125 100644
+--- a/arch/arm/dts/am437x-gp-evm.dts
++++ b/arch/arm/dts/am437x-gp-evm.dts
+@@ -732,7 +732,23 @@
+ 		};
+ 		partition@9 {
+ 			label = "NAND.file-system";
+-			reg = <0x00a00000 0x1f600000>;
++			reg = <0x00a00000 0x08000000>;
++		};
++		partition@10 {
++			label = "NAND.kernel2";
++			reg = <0x08a00000 0x00700000>;
++		};
++		partition@11 {
++			label = "NAND.file-system2";
++			reg = <0x09100000 0x08000000>;
++		};
++		partition@12 {
++			label = "NAND.recovery";
++			reg = <0x11100000 0x03200000>;
++		};
++		partition@13 {
++			label = "NAND.data";
++			reg = <0x14300000 0x0BD00000>;
+ 		};
+ 	};
+ };
+diff --git a/configs/am43xx_evm_defconfig b/configs/am43xx_evm_defconfig
+index bc55631c5b..0a39eb191f 100644
+--- a/configs/am43xx_evm_defconfig
++++ b/configs/am43xx_evm_defconfig
+@@ -6,6 +6,7 @@ CONFIG_AM43XX=y
+ CONFIG_DEFAULT_DEVICE_TREE="am437x-gp-evm"
+ CONFIG_SPL_LOAD_FIT=y
+ CONFIG_SYS_EXTRA_OPTIONS="CONS_INDEX=1"
++CONFIG_NAND_BOOT=y
+ CONFIG_SYS_CONSOLE_INFO_QUIET=y
+ CONFIG_VERSION_VARIABLE=y
+ CONFIG_SPL=y
+@@ -29,9 +30,11 @@ CONFIG_MTDPARTS_DEFAULT="mtdparts=nand.0:256k(NAND.SPL),256k(NAND.SPL.backup1),2
+ CONFIG_ISO_PARTITION=y
+ CONFIG_OF_CONTROL=y
+ CONFIG_OF_LIST="am437x-gp-evm am437x-sk-evm am43x-epos-evm am437x-idk-evm"
++CONFIG_ENV_IS_IN_NAND=y
+ CONFIG_DM=y
+ # CONFIG_BLK is not set
+ CONFIG_DFU_MMC=y
++CONFIG_DFU_NAND=y
+ CONFIG_DFU_RAM=y
+ CONFIG_DFU_SF=y
+ CONFIG_DM_GPIO=y
+diff --git a/include/configs/am43xx_evm.h b/include/configs/am43xx_evm.h
+index 6e2cf7b9ec..5709a93ceb 100644
+--- a/include/configs/am43xx_evm.h
++++ b/include/configs/am43xx_evm.h
+@@ -123,6 +123,19 @@
+ #define CONFIG_ENV_OFFSET_REDUND       0x120000
+ #endif
+ 
++#ifdef CONFIG_NAND
++#define CONFIG_SYS_REDUNDAND_ENVIRONMENT
++/* dkilp? should be this? #define CONFIG_ENV_SIZE                0x40000 */
++#define CONFIG_ENV_RANGE               0x40000
++#define CONFIG_ENV_OFFSET              0x00280000
++
++/* dkilp: this cannot be defined when doing the SPL build */
++#ifndef CONFIG_SPL_BUILD
++#define CONFIG_ENV_OFFSET_REDUND       0x002c0000
++#endif
++
++#endif
++
+ /* SPI */
+ #define CONFIG_TI_SPI_MMAP
+ #define CONFIG_QSPI_SEL_GPIO                   48
+@@ -232,6 +245,10 @@
+ 
+ /* NAND support */
+ #ifdef CONFIG_NAND
++
++#define CONFIG_MTD_PARTITIONS
++#define CONFIG_MTD_DEVICE
++
+ /* NAND: device related configs */
+ #define CONFIG_SYS_NAND_PAGE_SIZE	4096
+ #define CONFIG_SYS_NAND_OOBSIZE		224
+@@ -280,7 +297,7 @@
+ 		"${optargs} " \
+ 		"root=${nandroot} " \
+ 		"rootfstype=${nandrootfstype}\0" \
+-	"nandroot=ubi0:rootfs rw ubi.mtd=NAND.file-system,4096\0" \
++	"nandroot=ubi0:rootfs rw ubi.mtd=NAND.file-system\0" \
+ 	"nandrootfstype=ubifs rootwait=1\0" \
+ 	"nandboot=echo Booting from nand ...; " \
+ 		"run nandargs; " \

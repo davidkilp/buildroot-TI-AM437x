@@ -1,0 +1,6 @@
+config BR2_PACKAGE_UMTP_RESPONDER
+	bool "umtp-responder"
+	depends on BR2_TOOLCHAIN_HAS_THREADS # dbus, libglib2
+	help
+	  Lightweight Media Transfer Protocol (MTP) responder daemon for GNU/Linux
+	  The uMTP-Responder allows files to be transferred to and from devices through the devices USB port.

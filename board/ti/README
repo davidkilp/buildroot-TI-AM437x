@@ -1,0 +1,16 @@
+Buildroot for TI AM437X Evaluation Board platforms:
+ 
+There are 2 configurations for this board.
+
+ - am437x_evm_defconfig  			- Builds a USBIFS root filesystem for booting from NAND flash.
+ - am437x_evm_recovery_defconfig 	- Builds a small combined kernel + RAMFS based root filsystem suitable for update/recovery
+ 
+To build it:
+
+# cd <top of buildroot>
+# make am437x_evm_defconfig
+# make
+
+NOTE:
+The "recovery" image uses a different rootfs overlay scheme that adds
+support to run the USB MTP responder (umtpd) program.
