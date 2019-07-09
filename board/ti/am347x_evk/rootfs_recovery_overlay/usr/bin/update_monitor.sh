@@ -7,6 +7,9 @@
 # if the update fails, the results will be copied to the xfer director
 # for display to user
 #
+# This will update and configure the NAND to boot the primary image. That
+# is the NAND.kernel and NAND.file-system partitions only.
+#
 # NOTE: using inotifywait in this instance results in the CLOSE event
 # getting generated twice. Only when the 2nd time you see the CLOSE can
 # you assume the file has been actually been written. I think the first
@@ -14,6 +17,11 @@
 # 
 # 
 unset IFS                                 # default of space, tab and nl
+
+# configure to update the stable,main collection in .swu file
+SWU_BLACKLIST="0 1 2 3 4 5 6 7 8 10 11 12 13"
+SWU_SELECT="stable,main"
+
 
 # if we have an argument to script use it as a path to monitor directory
 if [ $# -eq 1 ]
@@ -63,8 +71,9 @@ inotifywait -m "$MONDIR" -e close_write  |
 			then
 				echo "Launching software update with $file"
 				logger -t update_monitor -p user.info "Launching software update with $file"
-				md5sum "$MONDIR"/$file
-				swupdate --hwrevision "Pocket-30:REV1" -L -l 3 --key /etc/swupdate-public.pem -v --image "$MONDIR"/"$file"
+				#md5sum "$MONDIR"/$file
+				#swupdate --hwrevision "Pocket-30:REV1" -L -l 3 --key /etc/swupdate-public.pem -v --image "$MONDIR"/"$file"
+				swupdate --hwrevision "Pocket-30:REV1" --file /etc/swupdate.cfg -L -l 5 --select "$SWU_SELECT" --blacklist "$SWU_BLACKLIST" --image "$MONDIR"/"$file"
 				if [ $? = 0 ] 
 				then 
 					logger -t update_monitor -p user.info "software update complete with status: $?"
