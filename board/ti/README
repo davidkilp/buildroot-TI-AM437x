@@ -4,23 +4,32 @@ There are 2 configurations for this board.
 
  - am437x_evm_defconfig  			- Builds a USBIFS root filesystem for booting from NAND flash.
  - am437x_evm_recovery_defconfig 	- Builds a small combined kernel + RAMFS based root filsystem suitable for update/recovery
- 
-To build it:
-
-# cd <top of buildroot>
-# make am437x_evm_defconfig
-# make
 
 NOTE:
 The "recovery" image uses a different rootfs overlay scheme that adds
 support to run the USB MTP responder (umtpd) program.
 
+ 
+To build normal image:
+========================
+
+# cd <top of buildroot>
+# make am437x_evm_defconfig
+# make
+
+
+To build Recovery image:
+========================
+
+# cd <top of buildroot>
+# make am437x_evm_recovery_defconfig
+# make
+
+The output is a combined kernel+RAMFS contained in the output/images/zImage file.
 
 To install the recovery image:
 
-The output is a combined kernel+RAMFS contained in the output/images/zImage file.
 To install this to NAND on a running image:
-
 First, erase the NAND.recovery partition:
 # flash_erase /dev/mtd12 0 0
 
