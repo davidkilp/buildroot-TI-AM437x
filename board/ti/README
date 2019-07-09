@@ -14,3 +14,43 @@ To build it:
 NOTE:
 The "recovery" image uses a different rootfs overlay scheme that adds
 support to run the USB MTP responder (umtpd) program.
+
+
+To install the recovery image:
+
+The output is a combined kernel+RAMFS contained in the output/images/zImage file.
+To install this to NAND on a running image:
+
+First, erase the NAND.recovery partition:
+# flash_erase /dev/mtd12 0 0
+
+Write zImage to this location:
+# nandwrite -p /dev/mtd12 zImage 
+
+To install from u-boot using built-in Ethernet and tftp to xfer image:
+
+configure IP address and TFTP server address:
+=> setenv ipaddr 192.168.1.30
+=> setenv serverip 192.168.1.157
+=> tftpboot 0x82000000 zImage
+
+erase the NAND.recovery partition
+=> nand erase.part NAND.recovery
+
+write it:
+=> nand write 0x82000000 NAND.recovery
+
+to run it manually from u-boot:
+=> run findfdt
+=> run ramargs
+=> nand read ${fdtaddr} NAND.u-boot-spl-os
+=> nand read ${loadaddr} NAND.recovery
+=> setenv bootargs console=ttyO0,115200n8 consoleblank=0 ignore_loglevel
+=> bootz ${loadaddr} - ${fdtaddr}
+
+This will boot from RAM and run the recovery image. A MTP Responder will
+be running on the USB port and a USB Host can send/receive files over USB
+interface.
+
+
+
