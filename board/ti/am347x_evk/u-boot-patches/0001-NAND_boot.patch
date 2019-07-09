@@ -28,7 +28,7 @@ index 142bfc52a1..d90b962125 100644
  	};
  };
 diff --git a/configs/am43xx_evm_defconfig b/configs/am43xx_evm_defconfig
-index bc55631c5b..0a39eb191f 100644
+index bc55631c5b..be9482f8e0 100644
 --- a/configs/am43xx_evm_defconfig
 +++ b/configs/am43xx_evm_defconfig
 @@ -6,6 +6,7 @@ CONFIG_AM43XX=y
@@ -39,7 +39,12 @@ index bc55631c5b..0a39eb191f 100644
  CONFIG_SYS_CONSOLE_INFO_QUIET=y
  CONFIG_VERSION_VARIABLE=y
  CONFIG_SPL=y
-@@ -29,9 +30,11 @@ CONFIG_MTDPARTS_DEFAULT="mtdparts=nand.0:256k(NAND.SPL),256k(NAND.SPL.backup1),2
+@@ -25,13 +26,15 @@ CONFIG_CMD_NAND=y
+ # CONFIG_CMD_SETEXPR is not set
+ CONFIG_CMD_MTDPARTS=y
+ CONFIG_MTDIDS_DEFAULT="nand0=nand.0"
+-CONFIG_MTDPARTS_DEFAULT="mtdparts=nand.0:256k(NAND.SPL),256k(NAND.SPL.backup1),256k(NAND.SPL.backup2),256k(NAND.SPL.backup3),512k(NAND.u-boot-spl-os),1m(NAND.u-boot),256k(NAND.u-boot-env),256k(NAND.u-boot-env.backup1),7m(NAND.kernel),-(NAND.file-system)"
++CONFIG_MTDPARTS_DEFAULT="mtdparts=nand.0:256k(NAND.SPL),256k(NAND.SPL.backup1),256k(NAND.SPL.backup2),256k(NAND.SPL.backup3),512k(NAND.u-boot-spl-os),1m(NAND.u-boot),256k(NAND.u-boot-env),256k(NAND.u-boot-env.backup1),7m(NAND.kernel),128m(NAND.file-system),7m(NAND.kernel2),128m(NAND.file-system2),50m(NAND.recovery),-(NAND.data)"
  CONFIG_ISO_PARTITION=y
  CONFIG_OF_CONTROL=y
  CONFIG_OF_LIST="am437x-gp-evm am437x-sk-evm am43x-epos-evm am437x-idk-evm"
@@ -52,7 +57,7 @@ index bc55631c5b..0a39eb191f 100644
  CONFIG_DFU_SF=y
  CONFIG_DM_GPIO=y
 diff --git a/include/configs/am43xx_evm.h b/include/configs/am43xx_evm.h
-index 6e2cf7b9ec..de66a34ef6 100644
+index 6e2cf7b9ec..c4954cce9b 100644
 --- a/include/configs/am43xx_evm.h
 +++ b/include/configs/am43xx_evm.h
 @@ -123,6 +123,19 @@
@@ -75,7 +80,32 @@ index 6e2cf7b9ec..de66a34ef6 100644
  /* SPI */
  #define CONFIG_TI_SPI_MMAP
  #define CONFIG_QSPI_SEL_GPIO                   48
-@@ -232,6 +245,10 @@
+@@ -153,6 +166,16 @@
+ 	"usbdev=0\0" \
+ 	"ramroot=/dev/ram0 rw\0" \
+ 	"ramrootfstype=ext2\0" \
++	"recovery=0\0"\
++	"recoveryargs=setenv bootargs console=ttyO0,115200n8 "\
++		"consoleblank=0 ignore_loglevel\0"\
++	"recoveryboot=if test ${recovery} -eq 1; "\
++		"then echo Booting Recovery image...; "\
++		"run findfdt; run recoveryargs; "\
++		"nand read ${fdtaddr} NAND.u-boot-spl-os; "\
++		"nand read ${loadaddr} NAND.recovery; "\
++		"bootz ${loadaddr} - ${fdtaddr};"\
++		"fi\0"\
+ 	"usbargs=setenv bootargs console=${console} " \
+ 		"${optargs} " \
+ 		"root=${usbroot} " \
+@@ -206,6 +229,7 @@
+ 		"run update_to_fit;"	\
+ 	"fi;"	\
+ 	"run findfdt; " \
++	"run recoveryboot;" \
+ 	"run envboot;" \
+ 	"run mmcboot;" \
+ 	"run usbboot;" \
+@@ -232,6 +256,10 @@
  
  /* NAND support */
  #ifdef CONFIG_NAND
@@ -86,7 +116,7 @@ index 6e2cf7b9ec..de66a34ef6 100644
  /* NAND: device related configs */
  #define CONFIG_SYS_NAND_PAGE_SIZE	4096
  #define CONFIG_SYS_NAND_OOBSIZE		224
-@@ -279,8 +296,10 @@
+@@ -279,8 +307,10 @@
  	"nandargs=setenv bootargs console=${console} " \
  		"${optargs} " \
  		"root=${nandroot} " \
