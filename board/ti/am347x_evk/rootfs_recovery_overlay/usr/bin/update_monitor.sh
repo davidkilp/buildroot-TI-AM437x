@@ -80,6 +80,8 @@ inotifywait -m "$MONDIR" -e close_write  |
 					# force exit of this script as we are done
 					WCLOSE_COUNT=0 		# reset count
 					#kill "$PID"
+					# disable recovery mode to boot new fimware
+					fw_setenv recovery 0
 					reboot
 				else
 					logger -t update_monitor -p user.info "Software Update failed. Sending log to output"
