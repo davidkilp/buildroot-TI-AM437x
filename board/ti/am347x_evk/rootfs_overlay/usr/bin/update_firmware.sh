@@ -57,7 +57,7 @@ then
 else
 	echo "Fimware update successful - rebooting unit"
 	logger -t update_firmware -p user.error "Fimware update successful - rebooting unit"
-	# reboot
+	reboot
 fi
 
 exit 0
