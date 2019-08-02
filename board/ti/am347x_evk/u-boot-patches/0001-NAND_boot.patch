@@ -28,7 +28,7 @@ index 142bfc52a1..d90b962125 100644
  	};
  };
 diff --git a/configs/am43xx_evm_defconfig b/configs/am43xx_evm_defconfig
-index bc55631c5b..be9482f8e0 100644
+index bc55631c5b..ec6d7721a6 100644
 --- a/configs/am43xx_evm_defconfig
 +++ b/configs/am43xx_evm_defconfig
 @@ -6,6 +6,7 @@ CONFIG_AM43XX=y
@@ -39,7 +39,7 @@ index bc55631c5b..be9482f8e0 100644
  CONFIG_SYS_CONSOLE_INFO_QUIET=y
  CONFIG_VERSION_VARIABLE=y
  CONFIG_SPL=y
-@@ -25,13 +26,15 @@ CONFIG_CMD_NAND=y
+@@ -25,13 +26,16 @@ CONFIG_CMD_NAND=y
  # CONFIG_CMD_SETEXPR is not set
  CONFIG_CMD_MTDPARTS=y
  CONFIG_MTDIDS_DEFAULT="nand0=nand.0"
@@ -51,16 +51,17 @@ index bc55631c5b..be9482f8e0 100644
 +CONFIG_ENV_IS_IN_NAND=y
  CONFIG_DM=y
  # CONFIG_BLK is not set
++CONFIG_BOOTCOUNT=y
  CONFIG_DFU_MMC=y
 +CONFIG_DFU_NAND=y
  CONFIG_DFU_RAM=y
  CONFIG_DFU_SF=y
  CONFIG_DM_GPIO=y
 diff --git a/include/configs/am43xx_evm.h b/include/configs/am43xx_evm.h
-index 6e2cf7b9ec..c4954cce9b 100644
+index 6e2cf7b9ec..9e4c14e816 100644
 --- a/include/configs/am43xx_evm.h
 +++ b/include/configs/am43xx_evm.h
-@@ -123,6 +123,19 @@
+@@ -123,6 +123,31 @@
  #define CONFIG_ENV_OFFSET_REDUND       0x120000
  #endif
  
@@ -73,6 +74,18 @@ index 6e2cf7b9ec..c4954cce9b 100644
 +/* dkilp: this cannot be defined when doing the SPL build */
 +#ifndef CONFIG_SPL_BUILD
 +#define CONFIG_ENV_OFFSET_REDUND       0x002c0000
++
++/* Bootcount using the RTC block */
++#define CONFIG_BOOTCOUNT_LIMIT
++#define CONFIG_BOOTCOUNT_AM33XX
++#define CONFIG_SYS_BOOTCOUNT_BE
++/*
++ * RTC related defines. To use bootcount you must set bootlimit in the
++ * environment to a non-zero value and enable CONFIG_BOOTCOUNT_LIMIT
++ * in the board config.
++ */
++#define CONFIG_SYS_BOOTCOUNT_ADDR	0x44E3E000
++
 +#endif
 +
 +#endif
@@ -80,7 +93,20 @@ index 6e2cf7b9ec..c4954cce9b 100644
  /* SPI */
  #define CONFIG_TI_SPI_MMAP
  #define CONFIG_QSPI_SEL_GPIO                   48
-@@ -153,6 +166,16 @@
+@@ -143,16 +168,36 @@
+ 	"bootpart=0:2\0" \
+ 	"bootdir=/boot\0" \
+ 	"bootfile=zImage\0" \
++	"bootlimit=3\0" \
++	"resetbootcount=mw.l 0x44e3e068 0 1\0" \
+ 	"console=ttyO0,115200n8\0" \
+ 	"partitions=" \
+ 		"uuid_disk=${uuid_gpt_disk};" \
+ 		"name=rootfs,start=2MiB,size=-,uuid=${uuid_gpt_rootfs}\0" \
+-	"optargs=\0" \
++	"optargs=panic=10\0" \
+ 	"usbroot=/dev/sda2 rw\0" \
+ 	"usbrootfstype=ext4 rootwait\0" \
  	"usbdev=0\0" \
  	"ramroot=/dev/ram0 rw\0" \
  	"ramrootfstype=ext2\0" \
@@ -94,10 +120,18 @@ index 6e2cf7b9ec..c4954cce9b 100644
 +		"nand read ${loadaddr} NAND.recovery; "\
 +		"bootz ${loadaddr} - ${fdtaddr};"\
 +		"fi\0"\
++	"altbootcmd=run switchactive\0"\
++	"switchactive="\
++		"if test -n ${bootselect}; "\
++		"then echo Switching to Primary image...; "\
++		"setenv bootselect; "\
++		"else echo Switching to Secondary image...; "\
++		"setenv bootselect 2; fi; "\
++		"mw.l 0x44e3e068 0 1; saveenv; reset; \0"\
  	"usbargs=setenv bootargs console=${console} " \
  		"${optargs} " \
  		"root=${usbroot} " \
-@@ -206,6 +229,7 @@
+@@ -206,6 +251,7 @@
  		"run update_to_fit;"	\
  	"fi;"	\
  	"run findfdt; " \
@@ -105,7 +139,7 @@ index 6e2cf7b9ec..c4954cce9b 100644
  	"run envboot;" \
  	"run mmcboot;" \
  	"run usbboot;" \
-@@ -232,6 +256,10 @@
+@@ -232,6 +278,10 @@
  
  /* NAND support */
  #ifdef CONFIG_NAND
@@ -116,7 +150,7 @@ index 6e2cf7b9ec..c4954cce9b 100644
  /* NAND: device related configs */
  #define CONFIG_SYS_NAND_PAGE_SIZE	4096
  #define CONFIG_SYS_NAND_OOBSIZE		224
-@@ -279,8 +307,10 @@
+@@ -279,10 +329,19 @@
  	"nandargs=setenv bootargs console=${console} " \
  		"${optargs} " \
  		"root=${nandroot} " \
@@ -124,8 +158,17 @@ index 6e2cf7b9ec..c4954cce9b 100644
 -	"nandroot=ubi0:rootfs rw ubi.mtd=NAND.file-system,4096\0" \
 +		"rootfstype=${nandrootfstype} " \
 +		"${nandoptargs}\0" \
++	"nanddisplayactive="\
++		"if test -n ${bootselect}; "\
++		"then echo Secondary Image active ; "\
++		"else echo Primary Image active; fi	\0" \
 +	"nandoptargs=ubi.mtd=NAND.data\0" \
-+	"nandroot=ubi0:rootfs rw ubi.mtd=NAND.file-system\0" \
++	"nandroot=ubi0:rootfs rw ubi.mtd=NAND.file-system${bootselect}\0" \
  	"nandrootfstype=ubifs rootwait=1\0" \
++	"nandseleectroot=setenv nandroot ubi0:rootfs rw "\
++		"ubi.mtd=NAND.file-system${bootselect}\0"\
  	"nandboot=echo Booting from nand ...; " \
++		"run nanddisplayactive; run nandseleectroot; " \
  		"run nandargs; " \
+ 		"nand read ${fdtaddr} NAND.u-boot-spl-os; " \
+ 		"nand read ${loadaddr} NAND.kernel; " \
