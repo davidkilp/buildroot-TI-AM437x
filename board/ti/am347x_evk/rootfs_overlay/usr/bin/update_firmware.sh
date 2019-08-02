@@ -22,7 +22,7 @@ SWU_FILE=$1
 # will have the currently running filesytem selected as 
 # 	ubi.mtd=NAND.file-system OR ubi.mtd=NAND.file-system2
 #
-ACTIVE_UBI=`cat /proc/cmdline |  awk '{print $4}' | awk -F "=" '{print $2}'`
+ACTIVE_UBI=`cat /proc/cmdline |  awk -F '=' '$1=="ubi.mtd"{print $2;exit}' RS=" "`
 echo "Current active filesystem: $ACTIVE_UBI"
 
 case "$ACTIVE_UBI" in
