@@ -1,0 +1,33 @@
+#!/bin/sh
+#
+# Reset the u-boot boot count value used to detect bad image looping.
+# 
+# For the TI AM437x processor, thie bootcount value is stored to the
+# RTC Scratch2 register. 
+# we just call a script to do this as it requies special writing mode
+#
+
+RESETSCRIPT="/usr/bin/reset_bootcounter.sh"
+
+start() {
+        printf "Reseting U-Boot bootcount: "
+        $RESETSCRIPT
+}
+
+
+case "$1" in
+  start)
+        start
+        ;;
+  stop)
+        echo "Stopping $0"
+        ;;
+  restart)
+        start
+        ;;
+  *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+esac
+
+exit $?
