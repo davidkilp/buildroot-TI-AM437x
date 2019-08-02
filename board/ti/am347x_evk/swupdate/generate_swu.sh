@@ -88,11 +88,11 @@ software =
 				bootenv: (
 					{
 						name = "nandboot";
-						value = "echo Booting from nand ...; run nandargs; nand read \${fdtaddr} NAND.u-boot-spl-os; nand read \${loadaddr} NAND.kernel; bootz \${loadaddr} - \${fdtaddr}"
+						value = "echo Booting from nand ...; run nandargs; nand read \${fdtaddr} NAND.u-boot-spl-os; nand read \${loadaddr} NAND.kernel; bootz \${loadaddr} - \${fdtaddr}";
 					},
 					{
 						name = "nandroot";
-						value = "ubi0:rootfs rw ubi.mtd=NAND.file-system"
+						value = "ubi0:rootfs rw ubi.mtd=NAND.file-system";
 					}
 				);
 				
@@ -142,11 +142,11 @@ software =
 				bootenv: (
 					{
 						name = "nandboot";
-						value = "echo Booting from nand ...; run nandargs; nand read \${fdtaddr} NAND.u-boot-spl-os; nand read \${loadaddr} NAND.kernel2; bootz \${loadaddr} - \${fdtaddr}"
+						value = "echo Booting from nand ...; run nandargs; nand read \${fdtaddr} NAND.u-boot-spl-os; nand read \${loadaddr} NAND.kernel2; bootz \${loadaddr} - \${fdtaddr}";
 					},
 					{
 						name = "nandroot";
-						value = "ubi0:rootfs rw ubi.mtd=NAND.file-system2"
+						value = "ubi0:rootfs rw ubi.mtd=NAND.file-system2";
 					}
 				);
 
