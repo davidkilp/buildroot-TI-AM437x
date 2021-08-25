@@ -13,6 +13,10 @@ uuu_version 0.64.72
 # 
 # This script is a starting point for createing a full script. See the
 # UUU documentation for converting a MfgTools .xml file into a UUU script.
+#
+# NOTE: the u-boot file that is booted is u-boot-imx6q-sentry-uuu.imx and
+# this comes from the Android Pie build although it can be built separately
+# from the u-boot source.
 # 
 #
 SDP: boot -f u-boot-imx6q-sentry-uuu.imx
