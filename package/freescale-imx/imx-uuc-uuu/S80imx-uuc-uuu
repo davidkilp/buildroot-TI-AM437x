@@ -1,0 +1,90 @@
+#!/bin/sh
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+
+NAME=uuc
+DAEMON=/usr/bin/$NAME
+DAEMON_ARGS="/dev/utp"
+
+UDC_DIR=/sys/class/udc
+
+function launch_uuc() {
+	echo $1 $2
+	mkdir /sys/kernel/config/usb_gadget/$1
+	cd /sys/kernel/config/usb_gadget/$1
+	echo 0x066F > idVendor
+
+	if [[ ${cmdline} == *nfsroot* ]]; then
+		echo 0x9CFF > idProduct
+	else
+		echo 0x9BFF > idProduct
+	fi
+
+	mkdir strings/0x409
+
+	if [ -e /sys/devices/soc0/soc_uid ]; then
+		cat /sys/devices/soc0/soc_uid > strings/0x409/serialnumber
+	else
+		echo 0000000000000000 > strings/0x409/serialnumber
+	fi
+
+	echo "FSL i.MX Board" > strings/0x409/product
+	mkdir configs/c.1
+	echo 5 > configs/c.1/MaxPower
+
+	echo ffs.utp$2
+
+	echo 1 > os_desc/use
+	echo "MSFT100" > os_desc/qw_sign
+	echo 0x40 > os_desc/b_vendor_code
+	mkdir functions/ffs.utp$2
+	mkdir /dev/usb-utp$2
+	mount -t functionfs utp$2 /dev/usb-utp$2
+	ln -s functions/ffs.utp$2 configs/c.1/
+	ln -s configs/c.1 os_desc
+
+	mkdir functions/mass_storage.1
+	ln -s functions/mass_storage.1 configs/c.1/
+	echo /fat > functions/mass_storage.1/lun.0/file
+
+	ufb /dev/usb-utp$2/ep0 &
+
+	echo run utp at /dev/usb-utp$2/ep0;
+	while [ ! -e /dev/usb-utp$2/ep1 ]
+	do
+		echo "."
+		sleep 1;
+	done
+
+	echo $1 > UDC
+
+
+	return 0;
+
+}
+
+
+
+case "$1" in
+    start)
+	printf "Starting $NAME: "
+	mount -t configfs none /sys/kernel/config
+	launch_uuc "ci_hdrc.0" 0
+	start-stop-daemon -S -q -b -m -p /var/run/${NAME}.pid -x $DAEMON -- $DAEMON_ARGS
+	[ $? = 0 ] && echo "OK" || echo "FAIL"
+	;;
+    stop)
+	printf "Stopping $NAME: "
+	start-stop-daemon -K -q -p /var/run/${NAME}.pid
+	[ $? = 0 ] && echo "OK" || echo "FAIL"
+	;;
+    restart|reload)
+	$0 stop
+	sleep 1
+	$0 start
+	;;
+    *)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
+
+exit $?
