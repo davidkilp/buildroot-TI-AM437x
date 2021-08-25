@@ -75,6 +75,8 @@ case "$1" in
     stop)
 	printf "Stopping $NAME: "
 	start-stop-daemon -K -q -p /var/run/${NAME}.pid
+	killall ufb
+	echo "" > /sys/kernel/config/usb_gadget/ci_hdrc.0/UDC
 	[ $? = 0 ] && echo "OK" || echo "FAIL"
 	;;
     restart|reload)
