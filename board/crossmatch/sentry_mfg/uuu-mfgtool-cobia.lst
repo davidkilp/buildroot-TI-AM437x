@@ -1,0 +1,34 @@
+uuu_version 0.64.72
+#
+# This is a "starting" point for creating the equivalent script to
+# what the old/deprecated MfgTools used where FBK replaces the commands sent 
+# but using the new Universal Update Utitlity (UUU). 
+# you would launch this by putting Sentry into Factory program mode (Hold
+# down the Volume Down button while pressing the Power button.
+# The lauch the uuu tool like this:
+# uuu uuu uuu-mfgtool-cobia.lst
+# 
+# Note. This script currently doesn't do much other than launch the 
+# kernel + ramdisk image and run a few commands to show that it's working
+# 
+# This script is a starting point for createing a full script. See the
+# UUU documentation for converting a MfgTools .xml file into a UUU script.
+# 
+#
+SDP: boot -f u-boot-imx6q-sentry-uuu.imx
+FB: ucmd setenv fastboot_buffer ${loadaddr}
+FB: download -f /home/dkilp/Projects/Buildroot/buildroot/output/images/zImage
+FB: ucmd setenv fastboot_buffer ${fdt_addr}
+FB: download -f /home/dkilp/Projects/Buildroot/buildroot/output/images/imx6q-claimcheck-ams.dtb
+FB: ucmd setenv fastboot_buffer ${initrd_addr}
+FB: download -f /home/dkilp/Projects/Buildroot/buildroot/output/images/rootfs.cpio.uboot
+FB: ucmd printenv
+FB: ucmd setenv bootargs console=ttymxc1,115200 rdinit=/init clk_ignore_unused
+FB: acmd bootz  ${loadaddr} ${initrd_addr} ${fdt_addr};
+FBK: delay 10000
+FBK: ucp /home/dkilp/Projects/Claimcheck/Releases/part-number-test.sh.tar t:/tmp
+FBK: ucmd cd /tmp; tar xf part-number-test.sh.tar
+#FBK: ucmd /tmp/part-number-test.sh
+FBK: ucmd ls /tmp
+FBK: acmd poweroff
+FBK: Done

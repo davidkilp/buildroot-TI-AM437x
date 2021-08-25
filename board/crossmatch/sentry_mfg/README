@@ -41,3 +41,40 @@ particular version, d6afb27e55d73d7ad08cd2dd51c784d8ec9694dc, that I
 know is working with the Sentry 4.14.98 Linux kernel used on 
 Sentry Android Pie builds.
 
+There is a simple example UUU script file, uuu-mfgtool-cobia.lst that 
+will run/function on a Sentry cobia unit.
+
+NOTE: The buildroot command for building a cpio ramdisk image creates a 
+special /init in the root of this ramdisk image. This MUST be run as the 
+FIRST command as specified on the kernel command line parameter "rdinit=/init".
+Howevedr, by default in the existing u-boot setup the kernel command line 
+is setup as follows:
+
+bootargs=console=ttymxc1,115200 rdinit=/linuxrc clk_ignore_unused
+
+We don't really want to run the linuxrc file here because as noted in the
+buildroot /init file that is in the cpio image:
+====== cpio /init ======
+#!/bin/sh
+# devtmpfs does not get automounted for initramfs
+/bin/mount -t devtmpfs devtmpfs /dev
+exec 0</dev/console
+exec 1>/dev/console
+exec 2>/dev/console
+exec /sbin/init "$@"
+====== cpio /init ======
+
+the devtmpfs isn't automatically mounted here so we first need to do that
+BEFORE we call the regular /sbin/init which is part of busybox. 
+
+If you don't do this, whent he device boots you get a bunch of warning about
+regular /dev devices that are missing.
+
+In order to handle this, the script above MODIFIES the default u-boot 
+"bootargs" variable on-the-fly to be:
+
+bootargs=console=ttymxc1,115200 rdinit=/init clk_ignore_unused
+
+which then works correctly.
+
+--david kilp (Aug 2021).
