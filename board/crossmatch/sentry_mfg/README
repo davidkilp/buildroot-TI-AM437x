@@ -1,0 +1,43 @@
+This creates a build for the Crossmatch Sentry device that will work
+with the Freescale UUU (Universal Update Utility) using the Freescale UTP 
+protocol.
+
+This is a replacement for the now deprecated Freescale MFgTools release
+which has been replaced with UUU. MfgTools was a Windows only utility and 
+UUU is cross-platform, albeit with a command line interface only.
+
+One of the changes this introduced was using Android's "fastboot" commands
+to do a lot of the flash programming which can be done using u-boot only 
+over USB. This mode can handle most programming required to bring a unit
+up. 
+
+The MfgTools program used a combination of u-boot + kernel + ram-based rootfs
+that when started via USB would create a special USB-based gadget interface
+that combined a USB Mass Storage gadget with special Freescale UTP extensions
+that allowed sending command back/forth over USB. In the case of Sentry, 
+this method allowed sending various scripts that could be used to check 
+that the EEPROM was programmed with the proper part number for example.
+
+This method is still supported via UUU and the associated "FBK" command but
+it requires first loading u-boot and then launching a kernel + ram-based rootfs
+using fastboot commands and launching it. At that point it functions similar 
+to the way it worked with the MfgTools.
+
+One major difference at least in later kernels is that the Freescale/NXP
+USB UTP gadget driver is no longer a separate device. As with most USB 
+gadget devices in later Linux Kernels the stand-alone USB gadget drivers 
+have now been replaced with dynamically configuring the gadget in user-space 
+rather than just hard-coding a particular USB gadget device. This allows
+more flexibility as the old method meant that you couldn't easily create
+a gadget device that supported more than one function without first removing
+whatever was currently being used.
+
+This is supported by the latest imx-uuu toolset which uses a special linuxrc
+file to create the proper UTP gadget on the fly. 
+See: https://github.com/NXPmicro/imx-uuc.git
+
+NOTE: that UTP might be deprecated in later versions and I'm using a 
+particular version, d6afb27e55d73d7ad08cd2dd51c784d8ec9694dc, that I 
+know is working with the Sentry 4.14.98 Linux kernel used on 
+Sentry Android Pie builds.
+
